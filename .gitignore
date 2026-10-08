@@ -18,3 +18,4 @@ frontend/playwright-report/
 # Outros
 .env
 .DS_Store
+frontend/test-results/
