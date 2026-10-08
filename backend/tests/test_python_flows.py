@@ -1,5 +1,5 @@
-"""Fluxos com código Python PERSONALIZADO, executado de verdade no contêiner isolado.
-Critérios 2, 7, 8 e 9, contrato do bloco e versões fixadas."""
+"""Fluxos com código Python executado de verdade no contêiner isolado: o passo "Executar código Python" (inline) e
+os blocos Python reutilizáveis da biblioteca. Contrato do código, erros com linha, limite de tempo, versões fixadas."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from app.errors import ApiError
 from app.exchange import importar
 from app.models import BlockDraft, Flow
 from app.sandbox import DockerExecutor
+from app.validation import analisar
 
 from .conftest import IMAGEM, _montar
-from .helpers import bloco, carregar_exemplo, con, constante, etapas, fluxo, saida
+from .helpers import (campo, carregar_exemplo, compor, estados, etapas, fluxo, lit, passo, python_inline, ref, repeticoes, saida)
 
 pytestmark = pytest.mark.docker
 
@@ -26,6 +27,140 @@ CODIGO_DO_ENUNCIADO = '''def run(inputs: dict, params: dict) -> dict:
 '''
 
 
+def valores(run):
+    return {o["title"]: o["value"] for o in run["result"]["outputs"]}
+
+
+# ------------------------------------------------------------------ Python inline
+def inline(codigo, entradas=None, saidas=None, **kw):
+    return python_inline("p", codigo, entradas, saidas if saidas is not None else {"mensagem": "texto"}, **kw)
+
+
+def com_saida(passos, titulo="mensagem", origem=("p", "mensagem"), campos=None):
+    return fluxo([*passos, saida("s", titulo, ref(*origem))], campos)
+
+
+def test_gatilho_python_saida_com_o_codigo_do_enunciado(com_docker):
+    f = com_saida([inline(CODIGO_DO_ENUNCIADO, {"nome": ("texto", ref("gatilho", "nome"))})], campos=[campo("nome", "texto", "Ana")])
+    run = com_docker.executar(f)
+    assert run["state"] == "concluido", run["error"]
+    assert valores(run) == {"mensagem": "Olá, Ana!"}
+    e = etapas(run)["p"]
+    assert e["inputs"] == {"nome": "Ana"} and e["outputs"] == {"mensagem": "Olá, Ana!"}
+
+
+def test_entrada_opcional_nao_preenchida_nao_aparece_em_inputs(com_docker):
+    p = inline(CODIGO_DO_ENUNCIADO)
+    p["params"]["entradas"] = [{"id": "nome", "label": "Nome", "type": "texto", "required": False}]
+    run = com_docker.executar(com_saida([p]))
+    assert valores(run) == {"mensagem": "Olá, mundo!"} and etapas(run)["p"]["inputs"] == {}
+
+
+def test_entrada_com_texto_e_conteudo_dinamico(com_docker):
+    from .helpers import tpl
+    f = com_saida([inline("def run(inputs, params):\n    return {'mensagem': inputs['nome'].upper()}",
+                          {"nome": ("texto", tpl("sr. ", ("gatilho", "nome")))})], campos=[campo("nome", "texto", "ana")])
+    assert valores(com_docker.executar(f)) == {"mensagem": "SR. ANA"}
+
+
+def test_excecao_identifica_o_passo_o_erro_e_a_linha(com_docker):
+    codigo = 'def run(inputs, params):\n    lista = [1, 2, 3]\n    return {"mensagem": lista[10]}\n'
+    run = com_docker.executar(com_saida([inline(codigo, label="Pegar o décimo item")]))
+    assert run["state"] == "falhou"
+    erro = run["error"]
+    assert erro["step_id"] == "p" and erro["step_name"] == "Pegar o décimo item"
+    assert erro["code"] == "excecao_python" and erro["line"] == 3
+    assert "linha 3" in erro["message"] and "posição que não existe" in erro["message"]
+    t = erro["technical"]
+    assert t["type"] == "IndexError" and t["snippet"] == 'return {"mensagem": lista[10]}' and "list index out of range" in t["message"]
+    assert 'File "<bloco>", line 3' in t["traceback"]
+    assert estados(run)["p"] == "falhou" and estados(run)["s"] == "ignorado"
+
+
+def test_print_vira_log_do_passo_e_segredos_sao_mascarados(com_docker):
+    codigo = 'def run(inputs, params):\n    print("olá")\n    print("senha=abc123")\n    import sys\n    return {"mensagem": "ok"}\n'
+    run = com_docker.executar(com_saida([inline(codigo)]))
+    texto = "".join(p["text"] for p in etapas(run)["p"]["logs"])
+    assert run["state"] == "falhou" and "não está disponível" in run["error"]["message"]  # `sys` está fora da lista
+    assert "olá" in texto and "abc123" not in texto and "[oculto]" in texto
+
+
+def test_laco_infinito_e_encerrado_pelo_limite_de_tempo_e_conta_como_expirou(settings):
+    rapido = DockerExecutor(IMAGEM, Limites(tempo_s=1.5, memoria_mb=128, folga_inicio_s=4.0))
+    amb = _montar(dataclasses.replace(settings, limites=rapido.limites), rapido)
+    f = fluxo([inline("def run(inputs, params):\n    n = 0\n    while True:\n        n += 1\n"),
+               compor("trata_falha", lit("falha comum"), run_after=["falhou"]),
+               compor("trata_tempo", lit("expirou"), run_after=["expirou"])])
+    run = amb.executar(f)
+    e = etapas(run)
+    assert e["p"]["error"]["code"] == "tempo_esgotado" and "1.5 s" in e["p"]["error"]["message"]
+    assert e["p"]["error"]["technical"]["line"] in (3, 4) and "laços sem fim" in e["p"]["error"]["suggestion"]
+    assert e["p"]["duration_ms"] < 8000
+    # "expirou" e "falhou" são situações diferentes: só o passo configurado para expirar roda
+    assert e["trata_falha"]["state"] == "ignorado"
+    f2 = fluxo([inline("def run(inputs, params):\n    while True:\n        pass\n"), compor("trata_tempo", lit("expirou"), run_after=["expirou"])])
+    run2 = amb.executar(f2)
+    assert estados(run2)["trata_tempo"] == "concluido" and run2["state"] == "concluido"
+
+
+def test_tempo_limite_do_proprio_passo_e_menor_que_o_do_servidor(com_docker):
+    f = fluxo([inline("def run(inputs, params):\n    while True:\n        pass\n", timeout=1)])
+    run = com_docker.executar(f)
+    assert run["state"] == "falhou" and "1 s" in run["error"]["message"]
+
+
+def test_tentativas_repetem_o_codigo_python_que_falhou(com_docker):
+    run = com_docker.executar(com_saida([inline("def run(inputs, params):\n    return {'mensagem': 1/0}", retry=1)]))
+    logs = [l["text"] for l in etapas(run)["p"]["logs"]]
+    assert run["state"] == "falhou" and any("Tentativa 1 de 2 falhou" in t for t in logs)
+
+
+@pytest.mark.parametrize("codigo,codigo_do_erro,trecho", [
+    ("def run(inputs, params):\n    return {}\n", "retorno_invalido", "não devolveu a saída declarada"),
+    ('def run(inputs, params):\n    return {"mensagem": "x", "extra": 1}\n', "retorno_invalido", "extra"),
+    ('def run(inputs, params):\n    return {"mensagem": 42}\n', "retorno_invalido", "deveria ser texto"),
+    ('def run(inputs, params):\n    return {"mensagem": {1, 2}}\n', "retorno_invalido", "JSON"),
+    ('def run(inputs, params):\n    return "texto solto"\n', "retorno_invalido", ""),
+])
+def test_contrato_do_retorno(com_docker, codigo, codigo_do_erro, trecho):
+    e = com_docker.executar(com_saida([inline(codigo)]))["error"]
+    assert e["code"] == codigo_do_erro and trecho in e["message"]
+
+
+def test_dados_json_e_listas_passam_intactos_e_unicode_tambem(com_docker):
+    codigo = 'def run(inputs, params):\n    d = inputs["dados"]\n    return {"total": sum(d["valores"]), "copia": d}\n'
+    dados = {"valores": [1, 2, 3.5], "nome": "ç"}
+    p = python_inline("p", codigo, {"dados": ("json", ref("gatilho", "d"))}, {"total": "numero", "copia": "json"})
+    f = fluxo([p, saida("s1", "total", ref("p", "total")), saida("s2", "copia", ref("p", "copia"))], [campo("d", "json", dados)])
+    assert valores(com_docker.executar(f)) == {"total": 6.5, "copia": dados}
+
+
+def test_codigo_dentro_de_um_laco_roda_uma_vez_por_item(com_docker):
+    p = python_inline("quadrado", "def run(inputs, params):\n    return {'n': inputs['n'] ** 2}", {"n": ("numero", ref("laco", "item"))}, {"n": "numero"})
+    f = fluxo([passo("laco", "builtin.para_cada", {"lista": ref("gatilho", "l")}, {"limite": 5}, slots={"corpo": [p]})], [campo("l", "lista", [2, 3, 4])])
+    run = com_docker.executar(f)
+    assert [repeticoes(run, "quadrado")[(i,)]["outputs"]["n"] for i in range(3)] == [4, 9, 16]
+
+
+def test_passos_python_encadeados_rodam_em_conteineres_separados_sem_dividir_arquivos(com_docker):
+    a = python_inline("a", 'def run(inputs, params):\n    open("/tmp/segredo", "w").write("x")\n    return {"mensagem": "a"}\n', saidas={"mensagem": "texto"})
+    b = python_inline("b", 'def run(inputs, params):\n    try:\n        open("/tmp/segredo")\n        return {"mensagem": "vazou"}\n'
+                           '    except OSError:\n        return {"mensagem": "isolado"}\n', saidas={"mensagem": "texto"})
+    assert valores(com_docker.executar(fluxo([a, b, saida("s", "r", ref("b", "mensagem"))]))) == {"r": "isolado"}
+
+
+def test_transformar_lista_com_python_roda_tudo_em_uma_so_execucao(com_docker):
+    codigo = "def transformar(item, indice):\n    return {'n': item, 'quadrado': item * item, 'pos': indice}\n"
+    f = fluxo([passo("t", "builtin.transformar_lista", {"lista": lit([1, 2, 3, 4])}, {"operacao": "python", "codigo": codigo, "limite": 10}),
+               saida("s", "r", ref("t", "resultado"))])
+    assert valores(com_docker.executar(f))["r"] == [{"n": n, "quadrado": n * n, "pos": n - 1} for n in (1, 2, 3, 4)]
+    f["steps"][0]["params"]["codigo"] = "def transformar(item):\n    return 10 // item\n"
+    f["steps"][0]["inputs"]["lista"] = lit([5, 0, 1])
+    erro = com_docker.executar(f)["error"]
+    assert erro["code"] == "excecao_python" and "No item 2" in erro["message"] and erro["line"] == 2
+
+
+# ------------------------------------------------------------------ blocos Python reutilizáveis
 def declarar(codigo, nome="Meu bloco", entradas=None, saidas=None, params=None) -> BlockDraft:
     return BlockDraft.model_validate({
         "name": nome, "code": codigo,
@@ -35,169 +170,52 @@ def declarar(codigo, nome="Meu bloco", entradas=None, saidas=None, params=None) 
 
 
 def criar(amb, codigo, **kw):
-    res = custom_blocks.criar_bloco(amb.store, amb.executor, declarar(codigo, **kw))
-    return res["block"]
+    return custom_blocks.criar_bloco(amb.store, amb.executor, declarar(codigo, **kw))["block"]
 
 
-def fluxo_com(bloco_def, entradas=None, params=None, extra_saidas=("mensagem",)):
-    """início → (campo) → bloco personalizado → saída(s)."""
-    blocos = [bloco("inicio", "builtin.inicio", {"dados": entradas or {}}),
-              bloco("p", bloco_def["id"], params or {}, versao=bloco_def["version"])]
-    conexoes = []
-    if entradas:
-        blocos.append(bloco("campo", "builtin.selecionar_campos", {"caminhos": next(iter(entradas))}))
-        conexoes += [con("c1", "inicio", "dados", "campo", "objeto"), con("c2", "campo", "valor", "p", "nome")]
-    for i, porta in enumerate(extra_saidas):
-        blocos.append(saida(f"s{i}", porta))
-        conexoes.append(con(f"o{i}", "p", porta, f"s{i}", "valor"))
-    return fluxo(blocos, conexoes)
+def usando(b, entradas=None, params=None, campos=None):
+    p = passo("p", b["id"], entradas or {}, params or {}, versao=b["version"])
+    return fluxo([p, saida("s", "mensagem", ref("p", "mensagem"))], campos)
 
 
-def test_criterio_2_inicio_com_nome_funcao_python_de_saudacao_saida(com_docker):
-    res = importar(com_docker.store, com_docker.registro, carregar_exemplo("01-saudacao.json"))
-    run = com_docker.executar(res["flow"])
-    assert run["state"] == "concluido", run["error"]
-    assert run["result"]["outputs"] == [{"block_id": "saida", "title": "Mensagem", "value": "Olá, Ana!"}]
-    e = etapas(run)
-    assert e["campo"]["outputs"]["valor"] == "Ana"
-    assert e["saudar"]["inputs"] == {"nome": "Ana"} and e["saudar"]["outputs"] == {"mensagem": "Olá, Ana!"}
-
-
-def test_codigo_exatamente_como_no_enunciado_e_entrada_opcional_ausente(com_docker):
-    b = criar(com_docker, CODIGO_DO_ENUNCIADO)
-    run = com_docker.executar(fluxo_com(b))  # "nome" sem ligação → inputs.get usa o padrão
-    assert run["result"]["outputs"][0]["value"] == "Olá, mundo!"
-    assert etapas(run)["p"]["inputs"] == {}
-    run = com_docker.executar(fluxo_com(b, {"nome": "Beto"}))
-    assert run["result"]["outputs"][0]["value"] == "Olá, Beto!"
-
-
-def test_parametros_do_bloco_chegam_em_params_com_padrao(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": params["prefixo"] + "!"}',
-              entradas=[], params=[{"id": "prefixo", "label": "Prefixo", "type": "texto", "required": True, "default": "Oi"}])
-    assert com_docker.executar(fluxo_com(b))["result"]["outputs"][0]["value"] == "Oi!"
-    assert com_docker.executar(fluxo_com(b, params={"prefixo": "Tchau"}))["result"]["outputs"][0]["value"] == "Tchau!"
+def test_bloco_da_biblioteca_com_entrada_opcional_e_parametros_com_padrao(com_docker):
+    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": params["prefixo"] + inputs.get("nome", "?")}',
+              params=[{"id": "prefixo", "label": "Prefixo", "type": "texto", "required": True, "default": "Oi, "}])
+    assert valores(com_docker.executar(usando(b))) == {"mensagem": "Oi, ?"}
+    run = com_docker.executar(usando(b, {"nome": ref("gatilho", "n")}, {"prefixo": "Tchau, "}, [campo("n", "texto", "Lia")]))
+    assert valores(run) == {"mensagem": "Tchau, Lia"}
     with pytest.raises(ApiError) as exc:  # obrigatório e vazio → rejeitado antes de executar
-        com_docker.executar(fluxo_com(b, params={"prefixo": "  "}))
-    assert any(p["param"] == "prefixo" for p in exc.value.problemas)
+        com_docker.executar(usando(b, params={"prefixo": "  "}))
+    assert any(p["field"] == "prefixo" for p in exc.value.problemas)
 
 
-def test_criterio_7_excecao_identifica_o_bloco_o_erro_e_a_linha(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    lista = [1, 2, 3]\n    return {"mensagem": lista[10]}\n',
-              nome="Pega item", entradas=[])
-    f = fluxo_com(b)
-    f["blocks"][1]["label"] = "Pegar o décimo item"
-    run = com_docker.executar(f)
-    assert run["state"] == "falhou"
-    erro = run["error"]
-    assert erro["block_id"] == "p" and erro["block_name"] == "Pegar o décimo item"
-    assert erro["code"] == "excecao_python" and erro["line"] == 3
-    assert "linha 3" in erro["message"] and "posição que não existe" in erro["message"]
-    tecnico = erro["technical"]
-    assert tecnico["type"] == "IndexError" and tecnico["line"] == 3
-    assert tecnico["snippet"] == 'return {"mensagem": lista[10]}' and "list index out of range" in tecnico["message"]
-    assert 'File "<bloco>", line 3' in tecnico["traceback"]
-    e = etapas(run)
-    assert e["p"]["state"] == "falhou" and e["s0"]["state"] == "ignorado"  # o fluxo parou nesse bloco
-
-
-def test_stdout_e_stderr_viram_logs_do_bloco_e_segredos_sao_mascarados(com_docker):
-    codigo = ('def run(inputs, params):\n    print("olá")\n    print("senha=abc123")\n'
-              '    import sys\n    return {"mensagem": "ok"}\n')
-    # `sys` está fora da lista: o erro mostra isso, mas os logs anteriores são preservados
-    b = criar(com_docker, codigo, entradas=[])
-    run = com_docker.executar(fluxo_com(b))
-    e = etapas(run)["p"]
-    assert run["state"] == "falhou" and "não está disponível" in run["error"]["message"]
-    texto = "".join(p["text"] for p in e["logs"])
-    assert "olá" in texto and "abc123" not in texto and "[oculto]" in texto
-
-
-def test_criterio_8_laco_infinito_e_encerrado_pelo_limite_de_tempo(settings, executor):
-    rapido = DockerExecutor(IMAGEM, Limites(tempo_s=1.5, memoria_mb=128, folga_inicio_s=4.0))
-    amb = _montar(dataclasses.replace(settings, limites=rapido.limites), rapido)
-    b = criar(amb, 'def run(inputs, params):\n    n = 0\n    while True:\n        n += 1\n', entradas=[])
-    run = amb.executar(fluxo_com(b))
-    assert run["state"] == "falhou"
-    assert run["error"]["code"] == "tempo_esgotado" and run["error"]["block_id"] == "p"
-    assert "1.5 s" in run["error"]["message"]
-    assert run["error"]["line"] in (3, 4)  # onde o laço estava quando o limite estourou
-    assert "laços sem fim" in run["error"]["suggestion"]
-    assert etapas(run)["p"]["duration_ms"] < 8000
-
-
-def test_contrato_retorno_com_saida_declarada_faltando(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    return {}\n', entradas=[])
-    run = com_docker.executar(fluxo_com(b))
-    e = run["error"]
-    assert e["code"] == "retorno_invalido" and "não devolveu a saída declarada" in e["message"] and "mensagem" in e["message"]
-
-
-def test_contrato_retorno_com_saida_nao_declarada(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": "x", "extra": 1}\n', entradas=[])
-    e = com_docker.executar(fluxo_com(b))["error"]
-    assert e["code"] == "retorno_invalido" and "extra" in e["message"]
-
-
-def test_contrato_retorno_com_tipo_errado(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": 42}\n', entradas=[])
-    e = com_docker.executar(fluxo_com(b))["error"]
-    assert e["code"] == "retorno_invalido" and "deveria ser texto" in e["message"] and "número" in e["message"]
-
-
-def test_contrato_retorno_nao_serializavel_e_nao_dict(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": {1, 2}}\n', entradas=[])
-    e = com_docker.executar(fluxo_com(b))["error"]
-    assert e["code"] == "retorno_invalido" and "JSON" in e["message"]
-    b2 = criar(com_docker, 'def run(inputs, params):\n    return "texto solto"\n', entradas=[])
-    assert com_docker.executar(fluxo_com(b2))["error"]["code"] == "retorno_invalido"
-
-
-def test_dados_entre_blocos_sao_json_e_listas_e_objetos_passam_intactos(com_docker):
-    b = criar(com_docker,
-              'def run(inputs, params):\n    d = inputs["dados"]\n    return {"total": sum(d["valores"]), "copia": d}\n',
-              entradas=[{"id": "dados", "label": "Dados", "type": "json"}],
-              saidas=[{"id": "total", "label": "Total", "type": "numero"}, {"id": "copia", "label": "Cópia", "type": "json"}])
-    f = fluxo([bloco("i", "builtin.inicio", {"dados": {"valores": [1, 2, 3.5], "nome": "ç"}}), bloco("p", b["id"], versao=1),
-               saida("s1", "total"), saida("s2", "copia")],
-              [con("c1", "i", "dados", "p", "dados"), con("c2", "p", "total", "s1", "valor"), con("c3", "p", "copia", "s2", "valor")])
-    run = com_docker.executar(f)
-    valores = {o["title"]: o["value"] for o in run["result"]["outputs"]}
-    assert valores == {"total": 6.5, "copia": {"valores": [1, 2, 3.5], "nome": "ç"}}
-
-
-def test_criterio_9_bloco_salvo_e_reutilizado_em_outro_fluxo(com_docker):
-    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": inputs["nome"].upper()}\n',
+def test_bloco_salvo_e_reutilizado_em_outro_fluxo(com_docker):
+    b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": inputs["nome"].upper()}',
               nome="Caixa alta", entradas=[{"id": "nome", "label": "Nome", "type": "texto"}])
-    biblioteca = {t.id for t in com_docker.registro.listar()}
-    assert b["id"] in biblioteca  # aparece na biblioteca
-    for projeto, nome in (("um", "ana"), ("dois", "beto")):
-        run = com_docker.executar(fluxo_com(b, {"nome": nome}))
-        assert run["result"]["outputs"][0]["value"] == nome.upper(), projeto
+    assert b["id"] in {t.id for t in com_docker.registro.listar()}
+    for nome in ("ana", "beto"):
+        run = com_docker.executar(usando(b, {"nome": ref("gatilho", "n")}, campos=[campo("n", "texto", nome)]))
+        assert valores(run) == {"mensagem": nome.upper()}
 
 
 def test_versao_fixada_edicao_posterior_nao_altera_fluxos_existentes(com_docker):
     v1 = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": "versão 1"}\n', entradas=[])
-    f_antigo = fluxo_com(v1)
+    f_antigo = usando(v1)
     v2 = custom_blocks.nova_versao(com_docker.store, com_docker.registro, com_docker.executor, v1["id"],
                                    declarar('def run(inputs, params):\n    return {"mensagem": "versão 2"}\n', entradas=[]))["block"]
     assert v2["version"] == 2 and v2["id"] == v1["id"]
-    # o fluxo antigo continua exatamente igual
-    assert com_docker.executar(f_antigo)["result"]["outputs"][0]["value"] == "versão 1"
-    # um fluxo novo pode escolher a versão nova
-    assert com_docker.executar(fluxo_com(v2))["result"]["outputs"][0]["value"] == "versão 2"
-    # a biblioteca lista a mais nova, mas as duas continuam disponíveis
+    assert valores(com_docker.executar(f_antigo)) == {"mensagem": "versão 1"}  # o fluxo antigo continua igual
+    assert valores(com_docker.executar(usando(v2))) == {"mensagem": "versão 2"}
     assert {(t.id, t.version) for t in com_docker.registro.listar(todas_versoes=True) if t.id == v1["id"]} == {(v1["id"], 1), (v1["id"], 2)}
-    # e o fluxo antigo avisa (sem mudar nada) que existe versão mais nova
-    from app.validation import analisar
     a = analisar(Flow.model_validate(f_antigo), com_docker.registro.resolver, ultima_versao=com_docker.registro.ultima_versao)
     aviso = next(i for i in a.issues if i.code == "versao_desatualizada")
     assert aviso.severity == "aviso" and "v2" in aviso.message and "v1" in aviso.message
 
 
-def test_bloco_em_uso_nao_pode_ser_excluido(com_docker):
+def test_bloco_em_uso_dentro_de_um_ramo_nao_pode_ser_excluido(com_docker):
     b = criar(com_docker, 'def run(inputs, params):\n    return {"mensagem": "x"}\n', entradas=[])
-    com_docker.store.criar_projeto("Usa o bloco", "", fluxo_com(b))
+    aninhado = fluxo([passo("e", "builtin.escopo", slots={"corpo": [passo("p", b["id"], versao=1)]})])
+    com_docker.store.criar_projeto("Usa o bloco", "", aninhado)
     with pytest.raises(ApiError) as exc:
         custom_blocks.excluir_bloco(com_docker.store, b["id"])
     assert exc.value.status == 409 and "Usa o bloco" in exc.value.mensagem
@@ -210,15 +228,15 @@ def test_salvar_bloco_com_erro_de_sintaxe_ou_sem_run_e_recusado_com_a_linha(com_
     with pytest.raises(ApiError) as exc:
         custom_blocks.criar_bloco(com_docker.store, com_docker.executor, declarar("x = 1"))
     assert "def run(inputs, params)" in exc.value.mensagem
-    assert com_docker.store.listar_tipos() == []  # nada foi salvo
+    assert com_docker.store.listar_tipos() == []
 
 
 def test_declaracao_do_bloco_e_validada(com_docker):
-    with pytest.raises(ValidationError):  # id de porta inválido
+    with pytest.raises(ValidationError):
         declarar("def run(i, p):\n    return {}", saidas=[{"id": "Mensagem Ruim", "label": "x", "type": "texto"}])
-    with pytest.raises(ValidationError):  # ids repetidos
+    with pytest.raises(ValidationError):
         declarar("def run(i, p):\n    return {}", entradas=[{"id": "a", "label": "A"}, {"id": "a", "label": "B"}])
-    with pytest.raises(ApiError):  # sem nenhuma saída
+    with pytest.raises(ApiError):
         custom_blocks.criar_bloco(com_docker.store, com_docker.executor, declarar("def run(i, p):\n    return {}", saidas=[]))
 
 
@@ -231,31 +249,25 @@ def test_teste_isolado_de_bloco_python_com_dados_de_exemplo(com_docker):
     assert run["kind"] == "bloco" and run["state"] == "concluido"
     s = run["steps"][0]
     assert s["outputs"] == {"mensagem": "Oi, Lia"} and s["logs"] == [{"source": "stdout", "text": "testando\n"}]
-    falha = com_docker.motor.testar_bloco(tipo, {}, {"nome": "Lia"} | {})
-    assert falha["state"] == "concluido"
-    erro = com_docker.motor.testar_bloco(draft.model_copy(update={"code": 'def run(inputs, params):\n    return {"mensagem": 1/0}'}).para_tipo("custom.rascunho", 1), {}, {"nome": "x"})
-    assert erro["state"] == "falhou" and erro["error"]["line"] == 2
+    quebrado = draft.model_copy(update={"code": 'def run(inputs, params):\n    return {"mensagem": 1/0}'}).para_tipo("custom.rascunho", 1)
+    erro = com_docker.motor.testar_bloco(quebrado, {}, {"nome": "x"})
+    assert erro["state"] == "falhou" and erro["error"]["line"] == 2 and erro["error"]["step_id"] == "teste"
 
 
-def test_para_cada_com_codigo_python_aplica_a_funcao_a_todos_os_itens(com_docker):
-    codigo = "def transformar(item, indice):\n    return {'n': item, 'quadrado': item * item, 'pos': indice}\n"
-    f = fluxo([constante("l", "lista", [1, 2, 3, 4]),
-               bloco("cada", "builtin.para_cada", {"operacao": "python", "codigo": codigo, "limite": 10}), saida()],
-              [con("c1", "l", "valor", "cada", "lista"), con("c2", "cada", "resultado", "saida", "valor")])
-    run = com_docker.executar(f)
-    assert run["result"]["outputs"][0]["value"] == [{"n": n, "quadrado": n * n, "pos": n - 1} for n in (1, 2, 3, 4)]
-    f["blocks"][1]["params"]["codigo"] = "def transformar(item):\n    return 10 // item\n"
-    f["blocks"][0]["params"]["valor"] = [5, 0, 1]
-    run = com_docker.executar(f)
-    erro = run["error"]
-    assert erro["code"] == "excecao_python" and "No item 2" in erro["message"] and erro["line"] == 2
+# ------------------------------------------------------------------ os modelos entregues
+def test_modelos_com_python_produzem_os_resultados_documentados(com_docker):
+    def rodar(arquivo, dados=None):
+        res = importar(com_docker.store, com_docker.registro, carregar_exemplo(arquivo))
+        return com_docker.executar(res["flow"], dados)
 
-
-def test_dois_blocos_python_encadeados_rodam_em_contêineres_separados(com_docker):
-    b1 = criar(com_docker, 'def run(inputs, params):\n    open("/tmp/segredo", "w").write("x")\n    return {"mensagem": "a"}\n', entradas=[])
-    b2 = criar(com_docker,
-               'def run(inputs, params):\n    try:\n        open("/tmp/segredo")\n        return {"mensagem": "vazou"}\n    except OSError:\n        return {"mensagem": "isolado"}\n',
-               entradas=[{"id": "nome", "label": "Nome", "type": "texto"}])
-    f = fluxo([bloco("p1", b1["id"], versao=1), bloco("p2", b2["id"], versao=1), saida()],
-              [con("c1", "p1", "mensagem", "p2", "nome"), con("c2", "p2", "mensagem", "saida", "valor")])
-    assert com_docker.executar(f)["result"]["outputs"][0]["value"] == "isolado"
+    assert valores(rodar("01-saudacao.json")) == {"Saudação": "Olá, Ana!"}
+    assert valores(rodar("01-saudacao.json", {"nome": "  beto silva "})) == {"Saudação": "Olá, Beto Silva!"}
+    erro = rodar("05-tratar-erros.json")
+    assert erro["state"] == "concluido"  # a falha foi capturada
+    assert valores(erro)["Aviso"].startswith("Não foi possível calcular: O código tentou dividir por zero")
+    assert estados(erro)["tentar"] == "falhou" and estados(erro)["capturar"] == "concluido"
+    sem_erro = rodar("05-tratar-erros.json", {"divisor": 4})  # sem falha, o passo de captura é ignorado e o resultado aparece
+    assert valores(sem_erro) == {"Resultado da divisão": 25} and estados(sem_erro)["capturar"] == "ignorado"
+    laco = rodar("06-laco-e-variavel.json")
+    assert valores(laco) == {"Soma": 60, "Média": 20}
+    assert sorted(repeticoes(laco, "somar")) == [(0,), (1,), (2,)]

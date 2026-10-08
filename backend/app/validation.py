@@ -1,11 +1,15 @@
-"""Validação de fluxos, sempre ANTES de executar (e, para a estrutura, antes de salvar).
+"""Verificador de fluxo: valida o fluxo em passos, sempre ANTES de executar (e, para a estrutura, antes de salvar).
 
 Dois escopos de problema:
 
-* ``estrutura``    — ligações inválidas, tipos incompatíveis, ciclos, entradas duplicadas,
-                     junção de caminhos condicionais. Impedem criar a conexão e salvar.
-* ``configuracao`` — campos obrigatórios, entradas sem ligação, executor ausente. Um rascunho
-                     assim pode ser salvo, mas a execução é recusada.
+* ``estrutura``    — ids repetidos, espaços/gatilho inválidos. Impedem salvar.
+* ``configuracao`` — campos obrigatórios, conteúdo dinâmico inválido, variáveis, executor ausente…
+                     Um rascunho assim pode ser salvo, mas a execução é recusada.
+
+O conteúdo dinâmico só pode apontar para passos que **já rodaram** quando o passo atual executa: o gatilho,
+os irmãos anteriores, os irmãos anteriores dos contêineres que envolvem o passo, e as saídas "de dentro" do
+contêiner (o item do “Para cada”). Passos dentro de uma condição ou de um laço não ficam visíveis depois dele;
+os de um escopo ficam.
 """
 
 from __future__ import annotations
@@ -14,20 +18,28 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .blocks.builtin import VALIDADORES, requer_sandbox
-from .models import BlockInstance, BlockType, Connection, Flow, Issue, ParamDef
-from .tipos import ROTULOS_TIPO, descrever_valor, rotulo_tipo, tipos_compativeis, valor_e_do_tipo
+from .blocks.builtin import (
+    OPERADORES, OPERADORES_DE_ORDEM, OPERADORES_UNARIOS, VALIDADORES, _parse_numero, requer_sandbox,
+)
+from .config import Limites
+from .models import BlockType, Campo, Flow, ID_GATILHO, Issue, ParamDef, Passo, Ref
+from .passos import definicao_efetiva, percorrer, portas_declaradas, regras_declaradas
+from .tipos import ROTULOS_TIPO, descrever_valor, rotulo_tipo, tipo_do_valor, tipos_compativeis, valor_e_do_tipo
 
 Resolver = Callable[[str, int], BlockType | None]
 UltimaVersao = Callable[[str], int | None]
+
+CONTEINERES_DE_LACO = frozenset({"builtin.para_cada", "builtin.repetir_ate"})
+TIPOS_QUE_ACEITAM_CAMINHO = frozenset({"json", "lista", "qualquer"})
 
 
 @dataclass
 class Analise:
     issues: list[Issue] = field(default_factory=list)
-    defs: dict[str, BlockType] = field(default_factory=dict)
-    order: list[str] | None = None  # ordem topológica; None se houver ciclo
+    defs: dict[str, BlockType] = field(default_factory=dict)       # passo -> bloco registrado (versão fixada)
+    efetivas: dict[str, BlockType] = field(default_factory=dict)   # passo -> definição com portas declaradas
     port_types: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
+    ordem: list[str] = field(default_factory=list)                 # ids em ordem de documento (gatilho primeiro)
 
     @property
     def erros(self) -> list[Issue]:
@@ -38,8 +50,8 @@ class Analise:
         return [i for i in self.erros if i.scope == "estrutura"]
 
 
-def nome_bloco(bloco: BlockInstance, tipo: BlockType | None) -> str:
-    return bloco.label or (tipo.name if tipo else bloco.type)
+def nome_passo(passo: Passo, tipo: BlockType | None) -> str:
+    return passo.label or (tipo.name if tipo else passo.type)
 
 
 # ---------------------------------------------------------------------------- parâmetros
@@ -55,22 +67,11 @@ def parametro_visivel(pdef: ParamDef, tipo: BlockType, params: dict[str, Any]) -
     return atual in pdef.visible_when.values
 
 
-def tipo_efetivo_param(pdef: ParamDef, tipo: BlockType, params: dict[str, Any]) -> str:
-    """Tipo de dado do valor do parâmetro (a constante muda conforme o tipo escolhido)."""
-    if pdef.type_from and pdef.type_from.param:
-        ref = tipo.param(pdef.type_from.param)
-        escolhido = valor_efetivo(ref, params) if ref else None
-        if isinstance(escolhido, str) and escolhido in ROTULOS_TIPO:
-            return escolhido
-    return {"texto": "texto", "codigo": "texto", "numero": "numero", "booleano": "booleano",
-            "lista": "lista", "json": "json", "selecao": "texto"}[pdef.type]
-
-
 MAX_TEXTO_PARAM = 100_000         # caracteres em parâmetros de texto (o código tem limite próprio)
 MAX_JSON_PARAM = 1024 * 1024      # bytes de uma lista/objeto JSON digitado em um parâmetro
 
 
-def _grande_demais(pdef: ParamDef, valor: Any, tipo_dado: str, rotulo: str) -> str | None:
+def _grande_demais(pdef: ParamDef, valor: Any, rotulo: str) -> str | None:
     if isinstance(valor, str) and pdef.type != "codigo" and len(valor) > MAX_TEXTO_PARAM:
         return f"O texto de {rotulo} é grande demais (máximo de {MAX_TEXTO_PARAM:,} caracteres).".replace(",", ".")
     if isinstance(valor, (list, dict)) and len(json.dumps(valor, ensure_ascii=False, default=str)) > MAX_JSON_PARAM:
@@ -78,29 +79,18 @@ def _grande_demais(pdef: ParamDef, valor: Any, tipo_dado: str, rotulo: str) -> s
     return None
 
 
-def mensagem_parametro(pdef: ParamDef, valor: Any, tipo_dado: str) -> str | None:
-    """Devolve a mensagem de erro do valor, ou None se estiver válido."""
+def mensagem_parametro(pdef: ParamDef, valor: Any) -> str | None:
+    """Devolve a mensagem de erro do valor de um parâmetro, ou None se estiver válido."""
     rotulo = f"“{pdef.label}”"
     if valor is None:
         return f"O campo {rotulo} é obrigatório." if pdef.required else None
-    grande = _grande_demais(pdef, valor, tipo_dado, rotulo)
+    grande = _grande_demais(pdef, valor, rotulo)
     if grande:
         return grande
-    if pdef.type_from and pdef.type_from.param:
-        # o tipo do valor depende de outro parâmetro (ex.: constante)
-        if tipo_dado == "texto":
-            if not isinstance(valor, str):
-                return f"O campo {rotulo} precisa ser um texto."
-            if pdef.required and not pdef.allow_empty and valor.strip() == "":
-                return f"O campo {rotulo} é obrigatório."
-            return None
-        if not valor_e_do_tipo(valor, tipo_dado):
-            return f"O campo {rotulo} precisa ser {_artigo(tipo_dado)} (recebeu {descrever_valor(valor)})."
-        return _faixa(pdef, valor, rotulo) if tipo_dado == "numero" else None
-    if pdef.type in ("texto", "codigo", "selecao"):
+    if pdef.type in ("texto", "codigo", "selecao", "variavel"):
         if not isinstance(valor, str):
             return f"O campo {rotulo} precisa ser um texto."
-        if pdef.required and not pdef.allow_empty and valor.strip() == "":
+        if pdef.required and not pdef.allow_empty and valor.strip() == "" and pdef.type != "variavel":
             return f"O campo {rotulo} é obrigatório."
         if pdef.type == "selecao" and valor not in {o.value for o in pdef.options}:
             return f"Escolha uma das opções disponíveis em {rotulo}."
@@ -120,11 +110,6 @@ def mensagem_parametro(pdef: ParamDef, valor: Any, tipo_dado: str) -> str | None
     return None
 
 
-def _artigo(tipo: str) -> str:
-    return {"numero": "um número", "booleano": "sim ou não", "lista": "uma lista",
-            "json": "um objeto JSON", "texto": "um texto"}.get(tipo, rotulo_tipo(tipo))
-
-
 def _faixa(pdef: ParamDef, valor: Any, rotulo: str) -> str | None:
     if pdef.min is not None and valor < pdef.min:
         return f"O valor de {rotulo} deve ser pelo menos {pdef.min:g}."
@@ -134,308 +119,368 @@ def _faixa(pdef: ParamDef, valor: Any, rotulo: str) -> str | None:
 
 
 def parametros_efetivos(tipo: BlockType, params: dict[str, Any]) -> dict[str, Any]:
-    """Parâmetros com padrões aplicados; ignora o que não é visível nesta configuração."""
+    """Parâmetros com padrões aplicados (cópias, para o código nunca mexer nos padrões); ignora o que não é visível."""
     completos = {p.id: valor_efetivo(p, params) for p in tipo.params}
-    return {p.id: completos[p.id] for p in tipo.params
+    return {p.id: json.loads(json.dumps(completos[p.id])) for p in tipo.params
             if parametro_visivel(p, tipo, completos) and completos[p.id] is not None}
 
 
-# ---------------------------------------------------------------------------- grafo
-def _componentes_fortes(nos: list[str], arestas: dict[str, list[str]]) -> list[list[str]]:
-    """Tarjan. Devolve componentes com ciclo (tamanho > 1 ou laço em si mesmo)."""
-    indice: dict[str, int] = {}
-    baixo: dict[str, int] = {}
-    pilha: list[str] = []
-    na_pilha: set[str] = set()
-    contador = [0]
-    saida: list[list[str]] = []
-
-    def visitar(v: str) -> None:
-        indice[v] = baixo[v] = contador[0]
-        contador[0] += 1
-        pilha.append(v)
-        na_pilha.add(v)
-        for w in arestas.get(v, []):
-            if w not in indice:
-                visitar(w)
-                baixo[v] = min(baixo[v], baixo[w])
-            elif w in na_pilha:
-                baixo[v] = min(baixo[v], indice[w])
-        if baixo[v] == indice[v]:
-            comp = []
-            while True:
-                w = pilha.pop()
-                na_pilha.discard(w)
-                comp.append(w)
-                if w == v:
-                    break
-            if len(comp) > 1 or v in arestas.get(v, []):
-                saida.append(comp)
-
-    for n in nos:
-        if n not in indice:
-            visitar(n)
-    return saida
-
-
-def _caminho_do_ciclo(comp: list[str], arestas: dict[str, list[str]]) -> list[str]:
-    """Um ciclo concreto dentro do componente, para mostrar ao usuário (A → B → A)."""
-    dentro = set(comp)
-    inicio = comp[0]
-    fila = [[inicio]]
-    visto = {inicio}
-    while fila:
-        caminho = fila.pop(0)
-        for w in arestas.get(caminho[-1], []):
-            if w == inicio:
-                return caminho + [inicio]
-            if w in dentro and w not in visto:
-                visto.add(w)
-                fila.append(caminho + [w])
-    return comp + [comp[0]]
-
-
-def ordem_topologica(ids: list[str], conexoes: list[Connection]) -> list[str] | None:
-    """Kahn com desempate pela ordem da lista (nunca pela posição visual). None se houver ciclo."""
-    grau = {i: 0 for i in ids}
-    saida_de: dict[str, list[str]] = {i: [] for i in ids}
-    for c in conexoes:
-        if c.source.block in grau and c.target.block in grau:
-            grau[c.target.block] += 1
-            saida_de[c.source.block].append(c.target.block)
-    posicao = {i: n for n, i in enumerate(ids)}
-    prontos = sorted([i for i in ids if grau[i] == 0], key=posicao.get)
-    resultado: list[str] = []
-    while prontos:
-        atual = prontos.pop(0)
-        resultado.append(atual)
-        for w in saida_de[atual]:
-            grau[w] -= 1
-            if grau[w] == 0:
-                prontos.append(w)
-        prontos.sort(key=posicao.get)
-    return resultado if len(resultado) == len(ids) else None
+# ---------------------------------------------------------------------------- campos
+def campo_vazio(campo: Campo | None, tipo: str) -> bool:
+    """O campo está "sem preenchimento"? Texto fixo vazio e nenhum conteúdo dinâmico contam como vazio."""
+    if campo is None:
+        return True
+    if campo.dinamico:
+        return not any(isinstance(p, Ref) or p != "" for p in campo.parts or [])
+    if campo.value is None:
+        return True
+    return tipo == "texto" and isinstance(campo.value, str) and campo.value == ""
 
 
 # ---------------------------------------------------------------------------- análise
-def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None,
-             ultima_versao: UltimaVersao | None = None) -> Analise:
+def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_versao: UltimaVersao | None = None,
+             limites: Limites | None = None) -> Analise:
     """Analisa o fluxo.
 
     ``sandbox``: ``None`` = não verificar; objeto com ``disponivel`` e ``mensagem`` = verificar
-    se há blocos com código do usuário e o executor isolado está fora do ar.
+    se há passos com código do usuário e o executor isolado está fora do ar.
     """
     a = Analise()
-    issues = a.issues
 
     def add(**kw: Any) -> None:
-        issues.append(Issue(**kw))
+        a.issues.append(Issue(**kw))
 
-    # --- blocos
-    vistos: set[str] = set()
-    for b in flow.blocks:
-        if b.id in vistos:
-            add(code="bloco_duplicado", scope="estrutura", block_id=b.id,
-                message=f"O identificador de bloco “{b.id}” aparece mais de uma vez.")
+    passos: dict[str, Passo] = {}
+    todos: list[tuple[Passo, bool]] = [(flow.trigger, True)] + [(pos.passo, False) for pos in percorrer(flow.steps)]
+
+    # --- estrutura: ids, tipos, gatilho e espaços
+    if flow.trigger.id != ID_GATILHO:
+        add(code="gatilho_invalido", scope="estrutura", step_id=flow.trigger.id,
+            message=f"O identificador do gatilho precisa ser “{ID_GATILHO}”.")
+    for p, eh_gatilho in todos:
+        if p.id in passos:
+            add(code="passo_duplicado", scope="estrutura", step_id=p.id,
+                message=f"O identificador de passo “{p.id}” aparece mais de uma vez.")
             continue
-        vistos.add(b.id)
-        t = resolver(b.type, b.version)
+        passos[p.id] = p
+        t = resolver(p.type, p.version)
         if t is None:
-            add(code="bloco_desconhecido", scope="estrutura", block_id=b.id,
-                message=f"O bloco “{b.label or b.type}” (versão {b.version}) não está disponível nesta instalação.",
+            add(code="bloco_desconhecido", step_id=p.id,
+                message=f"O bloco “{p.label or p.type}” (versão {p.version}) não está disponível nesta instalação.",
                 hint="Se o fluxo veio de outra instalação, importe-o novamente para trazer os blocos personalizados.")
-        else:
-            a.defs[b.id] = t
-    blocos = {b.id: b for b in flow.blocks}
-
-    def nome(block_id: str) -> str:
-        return nome_bloco(blocos[block_id], a.defs.get(block_id))
-
-    # --- conexões (estrutura)
-    validas: list[Connection] = []
-    ids_conexao: set[str] = set()
-    alvo_ocupado: dict[tuple[str, str], str] = {}
-    for c in flow.connections:
-        if c.id in ids_conexao:
-            add(code="conexao_duplicada", scope="estrutura", connection_id=c.id,
-                message=f"O identificador de conexão “{c.id}” aparece mais de uma vez.")
             continue
-        ids_conexao.add(c.id)
-        s, d = c.source, c.target
-        if s.block not in blocos or d.block not in blocos:
-            add(code="conexao_invalida", scope="estrutura", connection_id=c.id,
-                message="Uma conexão aponta para um bloco que não existe mais.",
-                hint="Remova a conexão e ligue os blocos novamente.")
+        if t.trigger != eh_gatilho:
+            add(code="gatilho_invalido" if eh_gatilho else "passo_invalido", scope="estrutura", step_id=p.id,
+                message=(f"“{t.name}” é um gatilho e não pode ser usado como passo." if t.trigger
+                         else f"“{t.name}” não é um gatilho e não pode iniciar o fluxo."))
             continue
-        if s.block not in a.defs or d.block not in a.defs:
-            continue  # já reportado como bloco desconhecido
-        p_orig = a.defs[s.block].output(s.port)
-        p_dest = a.defs[d.block].input(d.port)
-        if p_orig is None or p_dest is None:
-            falta = f"saída “{s.port}” de “{nome(s.block)}”" if p_orig is None else f"entrada “{d.port}” de “{nome(d.block)}”"
-            add(code="conexao_invalida", scope="estrutura", connection_id=c.id, block_id=d.block,
-                message=f"A conexão usa a {falta}, que não existe neste bloco.",
-                hint="Se o bloco foi atualizado, remova a conexão e ligue novamente.")
-            continue
-        chave = (d.block, d.port)
-        if chave in alvo_ocupado:
-            add(code="entrada_duplicada", scope="estrutura", connection_id=c.id, block_id=d.block, port=d.port,
-                message=f"A entrada “{p_dest.label}” de “{nome(d.block)}” já recebe dados de outro bloco.",
-                hint="Cada entrada aceita uma única conexão. Remova a anterior ou use outra entrada.")
-            continue
-        alvo_ocupado[chave] = c.id
-        validas.append(c)
+        a.defs[p.id] = t
+        a.efetivas[p.id] = definicao_efetiva(t, p.params)
+        extras = sorted(set(p.slots) - {s.id for s in t.slots})
+        if extras:
+            add(code="espaco_invalido", scope="estrutura", step_id=p.id,
+                message=f"O passo “{nome_passo(p, t)}” tem passos dentro de “{', '.join(extras)}”, que não existe nesse bloco.")
 
-    # --- ciclos
-    ids = [b.id for b in flow.blocks if b.id in blocos]
-    arestas: dict[str, list[str]] = {}
-    for c in validas:
-        arestas.setdefault(c.source.block, []).append(c.target.block)
-    em_ciclo: set[str] = set()
-    for comp in _componentes_fortes(ids, arestas):
-        em_ciclo.update(comp)
-        caminho = _caminho_do_ciclo(comp, arestas)
-        conexoes_ciclo = [c.id for c in validas if c.source.block in comp and c.target.block in comp]
-        if len(caminho) == 2:
-            texto = f"“{nome(caminho[0])}” está ligado a si mesmo"
-        else:
-            texto = " → ".join(f"“{nome(n)}”" for n in caminho)
-        add(code="ciclo", scope="estrutura", block_id=comp[0], connection_ids=conexoes_ciclo,
-            message=f"Esta ligação cria um ciclo: {texto}. Nesta versão os fluxos não podem voltar a um bloco anterior.",
-            hint="Remova a conexão que volta para um bloco anterior. Para repetir uma ação em uma lista, use o bloco “Para cada item da lista”.")
-    a.order = None if em_ciclo else ordem_topologica(ids, validas)
+    tipos: dict[tuple[str, str], str] = {}        # (passo, saída) -> tipo efetivo
+    tipos_entrada: dict[str, dict[str, str]] = {}
+    variaveis: dict[str, str] = {}                # passo "inicializar variável" -> tipo
+    nomes_de_variavel: dict[str, str] = {}
+    saidas_vistas = False
 
-    entrada_de = {(c.target.block, c.target.port): c for c in validas}
+    def nome(step_id: str) -> str:
+        return nome_passo(passos[step_id], a.defs.get(step_id)) if step_id in passos else step_id
 
-    # --- tipos efetivos das portas
-    cache: dict[tuple[str, str], str] = {}
+    def tipo_do_campo(c: Campo) -> str:
+        if c.dinamico:
+            partes = c.parts or []
+            if len(partes) == 1 and isinstance(partes[0], Ref):
+                r = partes[0]
+                return "qualquer" if r.path else tipos.get((r.step, r.output), "qualquer")
+            return "texto"
+        return tipo_do_valor(c.value) or "qualquer"
 
-    def tipo_saida(block_id: str, port_id: str, visitando: frozenset = frozenset()) -> str:
-        chave = (block_id, port_id)
-        if chave in cache:
-            return cache[chave]
-        t = a.defs[block_id]
-        porta = t.output(port_id)
-        if porta is None:
-            return "qualquer"
-        resultado = porta.type
-        if porta.type_from and chave not in visitando:
-            if porta.type_from.param:
-                ref = t.param(porta.type_from.param)
-                escolhido = valor_efetivo(ref, blocos[block_id].params) if ref else None
-                if isinstance(escolhido, str) and escolhido in ROTULOS_TIPO:
-                    resultado = escolhido
-            elif porta.type_from.input:
-                c = entrada_de.get((block_id, porta.type_from.input))
-                if c is not None and c.source.block in a.defs:
-                    resultado = tipo_saida(c.source.block, c.source.port, visitando | {chave})
-        cache[chave] = resultado
-        return resultado
-
-    for bid, t in a.defs.items():
-        a.port_types[bid] = {
-            "inputs": {p.id: p.type for p in t.inputs},
-            "outputs": {p.id: tipo_saida(bid, p.id) for p in t.outputs},
-        }
-
-    # --- compatibilidade de tipos
-    for c in validas:
-        origem = tipo_saida(c.source.block, c.source.port)
-        p_dest = a.defs[c.target.block].input(c.target.port)
-        if not tipos_compativeis(origem, p_dest.type):
-            p_orig = a.defs[c.source.block].output(c.source.port)
-            add(code="tipo_incompativel", scope="estrutura", connection_id=c.id,
-                block_id=c.target.block, port=c.target.port,
-                message=(f"Não é possível ligar a saída “{p_orig.label}” de “{nome(c.source.block)}” "
-                         f"({rotulo_tipo(origem)}) à entrada “{p_dest.label}” de “{nome(c.target.block)}” "
-                         f"({rotulo_tipo(p_dest.type)})."),
-                hint="Os tipos precisam ser iguais. Converta o valor com outro bloco ou escolha outra porta.")
-
-    # --- junção de caminhos condicionais (só com grafo sem ciclo)
-    if a.order is not None:
-        tags_bloco: dict[str, frozenset[tuple[str, str]]] = {}
-        entradas_de: dict[str, list[Connection]] = {}
-        for c in validas:
-            entradas_de.setdefault(c.target.block, []).append(c)
-        for bid in a.order:
-            lista = []
-            for c in entradas_de.get(bid, []):
-                tags = set(tags_bloco.get(c.source.block, frozenset()))
-                p = a.defs[c.source.block].output(c.source.port)
-                if p is not None and p.conditional:
-                    tags.add((c.source.block, c.source.port))
-                lista.append((c, frozenset(tags)))
-            lista.sort(key=lambda x: len(x[1]))
-            cadeia = all(lista[i][1] <= lista[i + 1][1] for i in range(len(lista) - 1))
-            tags_bloco[bid] = frozenset().union(*[t for _, t in lista]) if lista else frozenset()
-            if not cadeia and bid in a.defs:
-                caminhos = sorted({f"“{a.defs[o].output(p).label}” de “{nome(o)}”" for _, t in lista for o, p in t})
-                add(code="juncao_condicional", scope="estrutura", block_id=bid,
-                    connection_ids=[c.id for c, _ in lista],
-                    message=(f"O bloco “{nome(bid)}” reúne caminhos condicionais diferentes ({'; '.join(caminhos)}). "
-                             "Nesta versão não é possível juntar caminhos de uma condição em um mesmo bloco."),
-                    hint="Use um bloco separado para cada caminho (por exemplo, duplique o bloco e ligue uma cópia em cada saída).")
-
-    # --- configuração de cada bloco
-    for b in flow.blocks:
-        t = a.defs.get(b.id)
-        if t is None or b.id not in blocos:
-            continue
-        completos = {p.id: valor_efetivo(p, b.params) for p in t.params}
-        conhecidos = {p.id for p in t.params}
-        for chave in b.params:
-            if chave not in conhecidos:
-                add(code="parametro_desconhecido", severity="aviso", block_id=b.id, param=chave,
-                    message=f"O bloco “{nome(b.id)}” tem a configuração “{chave}”, que a versão {b.version} não usa. Ela será ignorada.")
-        for p in t.params:
-            if not parametro_visivel(p, t, completos):
+    def conferir_referencias(p: Passo, campo: Campo, field_id: str, rotulo: str, visiveis: set[str],
+                             dentro: set[str]) -> None:
+        for ref in campo.referencias():
+            alvo = a.efetivas.get(ref.step)
+            if alvo is None:
+                if ref.step in passos:
+                    continue  # bloco desconhecido: já reportado
+                add(code="referencia_invalida", step_id=p.id, field=field_id,
+                    message=f"{nome(p.id)}: “{rotulo}” usa o conteúdo de um passo que não existe mais.",
+                    hint="Apague esse conteúdo dinâmico e escolha outro na lista de conteúdo dinâmico.")
                 continue
-            msg = mensagem_parametro(p, completos[p.id], tipo_efetivo_param(p, t, completos))
-            if msg:
-                add(code="parametro_invalido", block_id=b.id, param=p.id, message=f"{nome(b.id)}: {msg}")
+            porta = alvo.output(ref.output)
+            if ref.step in dentro:
+                if porta is None or not porta.inside:
+                    add(code="saida_inexistente", step_id=p.id, field=field_id,
+                        message=f"{nome(p.id)}: “{rotulo}” usa “{nome(ref.step)}”, que ainda está rodando; só o item atual "
+                                "e a posição ficam disponíveis dentro dele.")
+                continue
+            if ref.step not in visiveis:
+                add(code="referencia_invalida", step_id=p.id, field=field_id,
+                    message=f"{nome(p.id)}: “{rotulo}” usa o conteúdo de “{nome(ref.step)}”, que só roda depois deste passo "
+                            "ou em outro caminho do fluxo.",
+                    hint="Use conteúdo de passos que ficam antes deste (ou dentro do mesmo bloco).")
+                continue
+            if porta is None:
+                add(code="saida_inexistente", step_id=p.id, field=field_id,
+                    message=f"{nome(p.id)}: “{rotulo}” usa a saída “{ref.output}” de “{nome(ref.step)}”, que não existe.",
+                    hint="Se o bloco foi atualizado, escolha o conteúdo dinâmico de novo.")
+            elif porta.inside:
+                add(code="saida_inexistente", step_id=p.id, field=field_id,
+                    message=f"{nome(p.id)}: “{rotulo}” usa “{porta.label}”, que só existe dentro de “{nome(ref.step)}”.")
+            elif ref.path and tipos.get((ref.step, ref.output), "qualquer") not in TIPOS_QUE_ACEITAM_CAMINHO:
+                add(code="tipo_incompativel", step_id=p.id, field=field_id,
+                    message=f"{nome(p.id)}: “{rotulo}” usa um campo interno de “{porta.label}”, mas esse conteúdo é "
+                            f"{rotulo_tipo(tipos.get((ref.step, ref.output), 'qualquer'))}.")
+
+    def conferir_tipo(p: Passo, campo: Campo, tipo_esperado: str, field_id: str, rotulo: str) -> None:
+        obtido = tipo_do_campo(campo)
+        if tipos_compativeis(obtido, tipo_esperado):
+            return
+        if campo.dinamico and obtido == "texto" and len(campo.parts or []) > 1:
+            msg = (f"{nome(p.id)}: “{rotulo}” mistura texto com conteúdo dinâmico, o que gera um texto, "
+                   f"mas o campo espera {rotulo_tipo(tipo_esperado)}.")
+            dica = "Deixe só um conteúdo dinâmico no campo (sem texto ao redor)."
+        else:
+            msg = (f"{nome(p.id)}: “{rotulo}” recebe {rotulo_tipo(obtido)}, mas espera {rotulo_tipo(tipo_esperado)}.")
+            dica = "Escolha um conteúdo do tipo certo ou converta o valor com outro passo (por exemplo, um bloco Python)."
+        add(code="tipo_incompativel", step_id=p.id, field=field_id, message=msg, hint=dica)
+
+    def tipo_entrada_efetivo(p: Passo, t: BlockType, porta: Any) -> str:
+        if porta.type_from and porta.type_from.param:
+            ref = t.param(porta.type_from.param)
+            escolhido = valor_efetivo(ref, p.params) if ref else None
+            if isinstance(escolhido, str) and escolhido in ROTULOS_TIPO:
+                return escolhido
+        return porta.type
+
+    # ------------------------------------------------------------------ um passo
+    def analisar_passo(p: Passo, visiveis: set[str], dentro: tuple[str, ...], dentro_de_laco: bool) -> None:
+        nonlocal saidas_vistas
+        t, ef = a.defs.get(p.id), a.efetivas.get(p.id)
+        a.ordem.append(p.id)
+        if t is None or ef is None or passos.get(p.id) is not p:
+            return
+        dentro_set = set(dentro)
+        completos = {pd.id: valor_efetivo(pd, p.params) for pd in t.params}
+
+        # --- entradas
+        tipos_entrada[p.id] = {}
+        conhecidas = {porta.id for porta in ef.inputs}
+        for chave in p.inputs:
+            if chave not in conhecidas:
+                add(code="entrada_desconhecida", severity="aviso", step_id=p.id, field=chave,
+                    message=f"O passo “{nome(p.id)}” tem o campo “{chave}”, que o bloco não usa. Ele será ignorado.")
+        for porta in ef.inputs:
+            esperado = tipo_entrada_efetivo(p, t, porta)
+            tipos_entrada[p.id][porta.id] = esperado
+            campo = p.inputs.get(porta.id)
+            if campo is not None:
+                conferir_referencias(p, campo, porta.id, porta.label, visiveis, dentro_set)
+            if campo_vazio(campo, esperado):
+                if porta.required and porta.default is None:
+                    add(code="campo_obrigatorio", step_id=p.id, field=porta.id,
+                        message=f"{nome(p.id)}: o campo “{porta.label}” é obrigatório.",
+                        hint="Digite um valor ou escolha um conteúdo dinâmico de um passo anterior.")
+                continue
+            assert campo is not None
+            conferir_tipo(p, campo, esperado, porta.id, porta.label)
+
+        # --- parâmetros
+        conhecidos = {pd.id for pd in t.params}
+        for chave in p.params:
+            if chave not in conhecidos:
+                add(code="parametro_desconhecido", severity="aviso", step_id=p.id, field=chave,
+                    message=f"O passo “{nome(p.id)}” tem a configuração “{chave}”, que a versão {p.version} não usa. Ela será ignorada.")
+        for pd in t.params:
+            if not parametro_visivel(pd, t, completos):
+                continue
+            valor = completos[pd.id]
+            if pd.type == "regras":
+                _regras(p, pd, valor, visiveis, dentro_set)
+            elif pd.type == "portas":
+                _portas(p, t, pd, valor)
+            elif pd.type == "variavel":
+                _variavel(p, t, pd, valor)
+            else:
+                msg = mensagem_parametro(pd, valor)
+                if msg:
+                    add(code="parametro_invalido", step_id=p.id, field=pd.id, message=f"{nome(p.id)}: {msg}")
         validador = VALIDADORES.get(t.id)
         if validador:
-            for param_id, msg in validador(parametros_efetivos(t, b.params)):
-                add(code="parametro_invalido", block_id=b.id, param=param_id, message=f"{nome(b.id)}: {msg}")
-        for porta in t.inputs:
-            if porta.required and (b.id, porta.id) not in entrada_de:
-                add(code="entrada_obrigatoria", block_id=b.id, port=porta.id,
-                    message=f"{nome(b.id)}: a entrada “{porta.label}” precisa estar ligada à saída de outro bloco.",
-                    hint="Arraste da bolinha de saída de um bloco até esta entrada.")
-        if sandbox is not None and requer_sandbox(t, parametros_efetivos(t, b.params)) and not sandbox.disponivel:
-            add(code="executor_indisponivel", block_id=b.id,
-                message=(f"{nome(b.id)} executa código Python, mas o executor isolado não está disponível: "
+            for param_id, msg in validador(parametros_efetivos(t, p.params)):
+                add(code="parametro_invalido", step_id=p.id, field=param_id, message=f"{nome(p.id)}: {msg}")
+
+        # --- regras específicas de cada bloco
+        if t.id == "builtin.var_inicializar":
+            if dentro:
+                add(code="variavel_fora_do_topo", step_id=p.id,
+                    message=f"{nome(p.id)}: variáveis só podem ser criadas na lista principal do fluxo, fora de condições e laços.",
+                    hint="Mova este passo para fora do bloco e use “Definir variável” lá dentro.")
+            nome_var = str(completos.get("nome") or "").strip().lower()
+            if nome_var:
+                if nome_var in nomes_de_variavel and nomes_de_variavel[nome_var] != p.id:
+                    add(code="variavel_duplicada", step_id=p.id, field="nome",
+                        message=f"{nome(p.id)}: já existe uma variável chamada “{completos.get('nome')}”.")
+                nomes_de_variavel.setdefault(nome_var, p.id)
+            if not dentro:
+                variaveis[p.id] = str(completos.get("tipo") or "texto")
+        if t.id == "builtin.saida":
+            saidas_vistas = True
+            if dentro_de_laco:
+                add(code="saida_em_laco", step_id=p.id,
+                    message=f"{nome(p.id)}: a “Saída final” não pode ficar dentro de “Para cada” ou “Repetir até”.",
+                    hint="Guarde os valores em uma variável de lista e mostre a lista depois do laço.")
+        if p.settings.timeout_s is not None and limites is not None and p.settings.timeout_s > limites.tempo_s:
+            add(code="tempo_limite_invalido", step_id=p.id, field="timeout_s",
+                message=f"{nome(p.id)}: o tempo limite do passo não pode passar de {limites.tempo_s:g} s (limite do servidor).")
+        if sandbox is not None and requer_sandbox(t, parametros_efetivos(t, p.params)) and not sandbox.disponivel:
+            add(code="executor_indisponivel", step_id=p.id,
+                message=(f"{nome(p.id)} executa código Python, mas o executor isolado não está disponível: "
                          f"{sandbox.mensagem or 'verifique a instalação do Docker'}"),
-                hint=sandbox.instrucao or "A execução de código personalizado fica desabilitada até o executor estar disponível.")
+                hint=sandbox.instrucao or "A execução de código Python fica desabilitada até o executor estar disponível.")
         if ultima_versao is not None and t.kind == "python":
             ultima = ultima_versao(t.id)
-            if ultima and ultima > b.version:
-                add(code="versao_desatualizada", severity="aviso", block_id=b.id,
-                    message=(f"Existe uma versão mais nova de “{t.name}” (v{ultima}). Este fluxo continua usando a v{b.version}, "
+            if ultima and ultima > p.version:
+                add(code="versao_desatualizada", severity="aviso", step_id=p.id,
+                    message=(f"Existe uma versão mais nova de “{t.name}” (v{ultima}). Este fluxo continua usando a v{p.version}, "
                              "sem mudanças."),
-                    hint="Para usar a nova versão, atualize o bloco no painel de configuração e confira as conexões.")
+                    hint="Para usar a nova versão, atualize o bloco no painel de configuração e confira os campos.")
+
+        # --- tipos das saídas e das portas
+        saidas: dict[str, str] = {}
+        for porta in ef.outputs:
+            tipo_saida = porta.type
+            if porta.type_from:
+                if porta.type_from.param:
+                    ref = t.param(porta.type_from.param)
+                    escolhido = valor_efetivo(ref, p.params) if ref else None
+                    if isinstance(escolhido, str) and escolhido in ROTULOS_TIPO:
+                        tipo_saida = escolhido
+                elif porta.type_from.input:
+                    campo = p.inputs.get(porta.type_from.input)
+                    tipo_saida = tipo_do_campo(campo) if campo is not None and not campo_vazio(campo, "qualquer") else "qualquer"
+            tipos[(p.id, porta.id)] = tipo_saida
+            saidas[porta.id] = tipo_saida
+        a.port_types[p.id] = {"inputs": dict(tipos_entrada[p.id]), "outputs": saidas}
+
+    # ------------------------------------------------------------------ parâmetros especiais
+    def _regras(p: Passo, pd: ParamDef, valor: Any, visiveis: set[str], dentro: set[str]) -> None:
+        regras, erro = regras_declaradas(valor)
+        if erro:
+            add(code="parametro_invalido", step_id=p.id, field=pd.id, message=f"{nome(p.id)}: {erro}")
+            return
+        operadores = {o.value for o in OPERADORES}
+        for i, r in enumerate(regras, start=1):
+            onde = f"condição {i}" if len(regras) > 1 else "condição"
+            if r.op not in operadores:
+                add(code="parametro_invalido", step_id=p.id, field=pd.id,
+                    message=f"{nome(p.id)}: o teste da {onde} não existe: {r.op}.")
+                continue
+            conferir_referencias(p, r.esq, pd.id, f"Valor da {onde}", visiveis, dentro)
+            if campo_vazio(r.esq, "texto"):
+                add(code="campo_obrigatorio", step_id=p.id, field=pd.id,
+                    message=f"{nome(p.id)}: escolha o valor a testar na {onde}.",
+                    hint="Digite um valor ou escolha um conteúdo dinâmico de um passo anterior.")
+                continue
+            tipo_esq = tipo_do_campo(r.esq)
+            if r.op in OPERADORES_UNARIOS:
+                if r.op in ("verdadeiro", "falso") and tipo_esq not in ("booleano", "qualquer"):
+                    add(code="tipo_incompativel", step_id=p.id, field=pd.id,
+                        message=f"{nome(p.id)}: a {onde} espera um valor sim/não, mas recebe {rotulo_tipo(tipo_esq)}.",
+                        hint="Use outro teste (ex.: “é igual a”) ou escolha um valor sim/não.")
+                continue
+            if r.dir is None:
+                add(code="campo_obrigatorio", step_id=p.id, field=pd.id,
+                    message=f"{nome(p.id)}: preencha o valor de comparação da {onde}.")
+                continue
+            conferir_referencias(p, r.dir, pd.id, f"Comparar com da {onde}", visiveis, dentro)
+            if r.op in OPERADORES_DE_ORDEM and tipo_esq == "numero" and not r.dir.dinamico \
+                    and isinstance(r.dir.value, str) and _parse_numero(r.dir.value) is None:
+                add(code="parametro_invalido", step_id=p.id, field=pd.id,
+                    message=f"{nome(p.id)}: digite um número válido para comparar na {onde} (ex.: 10 ou 2,5).")
+
+    def _portas(p: Passo, t: BlockType, pd: ParamDef, valor: Any) -> None:
+        portas, erro = portas_declaradas(valor)
+        if erro:
+            add(code="parametro_invalido", step_id=p.id, field=pd.id, message=f"{nome(p.id)}: {erro}")
+        elif t.id == "builtin.python" and pd.id == "saidas" and not portas:
+            add(code="parametro_invalido", step_id=p.id, field=pd.id,
+                message=f"{nome(p.id)}: declare ao menos uma saída para o código Python.",
+                hint="As saídas são os nomes das chaves do dicionário devolvido por run().")
+
+    def _variavel(p: Passo, t: BlockType, pd: ParamDef, valor: Any) -> None:
+        if not isinstance(valor, str) or valor == "":
+            add(code="variavel_invalida", step_id=p.id, field=pd.id,
+                message=f"{nome(p.id)}: escolha a variável.",
+                hint="Crie uma variável antes com “Inicializar variável”.")
+            return
+        if valor not in variaveis:
+            add(code="variavel_invalida", step_id=p.id, field=pd.id,
+                message=f"{nome(p.id)}: a variável escolhida não existe (ou é criada só depois deste passo).",
+                hint="Crie a variável com “Inicializar variável” antes deste passo.")
+            return
+        tipo_var = variaveis[valor]
+        if t.id == "builtin.var_incrementar" and tipo_var != "numero":
+            add(code="variavel_invalida", step_id=p.id, field=pd.id,
+                message=f"{nome(p.id)}: só é possível incrementar variáveis do tipo número (“{nome(valor)}” é {rotulo_tipo(tipo_var)}).")
+        if t.id == "builtin.var_acrescentar" and tipo_var != "lista":
+            add(code="variavel_invalida", step_id=p.id, field=pd.id,
+                message=f"{nome(p.id)}: só é possível acrescentar itens a variáveis do tipo lista (“{nome(valor)}” é {rotulo_tipo(tipo_var)}).")
+        if t.id == "builtin.var_definir":
+            campo = p.inputs.get("valor")
+            if campo is not None and not campo_vazio(campo, "qualquer"):
+                obtido = tipo_do_campo(campo)
+                if not tipos_compativeis(obtido, tipo_var):
+                    add(code="tipo_incompativel", step_id=p.id, field="valor",
+                        message=f"{nome(p.id)}: a variável “{nome(valor)}” é {rotulo_tipo(tipo_var)}, mas o novo valor é {rotulo_tipo(obtido)}.")
+
+    # ------------------------------------------------------------------ percurso
+    def visitar_lista(lista: list[Passo], visiveis: list[str], dentro: tuple[str, ...], laco: bool) -> list[str]:
+        """Analisa uma lista de passos. Devolve os ids que ficam visíveis depois dela (passos de escopos incluídos)."""
+        locais: list[str] = []
+        for p in lista:
+            analisar_passo(p, set(visiveis) | set(locais), dentro, laco)
+            t = a.defs.get(p.id)
+            if t is not None and t.slots and passos.get(p.id) is p:
+                transparentes: list[str] = []
+                for s in t.slots:
+                    exportados = visitar_lista(p.slots.get(s.id, []), visiveis + locais, (*dentro, p.id),
+                                               laco or t.id in CONTEINERES_DE_LACO)
+                    if s.transparent:
+                        transparentes.extend(exportados)
+                locais.append(p.id)
+                locais.extend(transparentes)
+            else:
+                locais.append(p.id)
+        return locais
+
+    analisar_passo(flow.trigger, set(), (), False)
+    if flow.trigger.id in a.efetivas:
+        _gatilho_ok(a, flow.trigger, add)
+    visitar_lista(flow.steps, [flow.trigger.id], (), False)
 
     # --- fluxo como um todo
-    if not flow.blocks:
-        add(code="fluxo_vazio", message="O fluxo está vazio.", hint="Arraste blocos da biblioteca para a área de trabalho.")
-    elif not any(t.id == "builtin.saida" for t in a.defs.values()):
+    if not flow.steps:
+        add(code="fluxo_vazio", message="O fluxo não tem nenhum passo.",
+            hint="Clique em “+” abaixo do gatilho para adicionar o primeiro passo.")
+    elif not saidas_vistas:
         add(code="sem_saida", severity="aviso",
-            message="O fluxo não tem um bloco “Saída final”, então nenhum resultado será exibido.",
-            hint="Adicione uma “Saída final” e ligue o valor que quer ver.")
+            message="O fluxo não tem um passo “Saída final”, então nenhum resultado será exibido.",
+            hint="Adicione uma “Saída final” e escolha o valor que quer ver.")
     return a
 
 
-def _chave(i: Issue) -> tuple:
-    return (i.code, i.connection_id, tuple(i.connection_ids), i.block_id, i.port, i.message)
-
-
-def verificar_conexao(flow: Flow, nova: Connection, resolver: Resolver) -> list[Issue]:
-    """Problemas de estrutura que a nova conexão introduziria (lista vazia = pode conectar).
-
-    Compara o fluxo antes e depois: uma conexão nova também pode invalidar OUTRAS conexões (ex.: mudar o tipo
-    que uma condição repassa), e isso precisa ser recusado no momento de conectar, não só ao salvar.
-    """
-    antes = {_chave(i) for i in analisar(flow, resolver).erros_de_estrutura}
-    candidato = flow.model_copy(update={"connections": [*flow.connections, nova]})
-    depois = analisar(candidato, resolver).erros_de_estrutura
-    return [i for i in depois if _chave(i) not in antes]
+def _gatilho_ok(a: Analise, gatilho: Passo, add: Callable[..., None]) -> None:
+    """Campos do gatilho: ids únicos e padrões compatíveis com o tipo."""
+    ef = a.efetivas[gatilho.id]
+    nomes_usados = [o.label.strip().lower() for o in ef.outputs]
+    for dup in sorted({n for n in nomes_usados if nomes_usados.count(n) > 1}):
+        add(code="parametro_invalido", step_id=gatilho.id, field="campos",
+            message=f"O gatilho tem dois campos com o nome “{dup}”.")
+    for porta in ef.outputs:
+        if porta.default is not None and porta.type != "qualquer" and not valor_e_do_tipo(porta.default, porta.type):
+            add(code="parametro_invalido", step_id=gatilho.id, field="campos",
+                message=f"O valor padrão do campo “{porta.label}” deveria ser {rotulo_tipo(porta.type)}.")

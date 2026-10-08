@@ -1,7 +1,12 @@
-"""Modelos de dados: definição de tipos de bloco, fluxo e problemas de validação.
+"""Modelos de dados (formato 2): definição de blocos, fluxo em passos e problemas de validação.
 
-As chaves do JSON são em inglês (como o contrato ``inputs``/``params``); valores,
-identificadores de domínio e mensagens são em português.
+Um fluxo tem um **gatilho** e uma lista de **passos** que rodam em sequência, como no Power Automate.
+Alguns passos são contêineres (condição, para cada, escopo…) e têm listas de passos filhos (``slots``).
+Os dados passam de um passo ao outro por **conteúdo dinâmico**: um campo guarda um valor fixo ou uma
+referência à saída de um passo anterior (``Ref``), nunca uma "ligação" entre portas.
+
+As chaves do JSON são em inglês (como o contrato ``inputs``/``params``); valores, identificadores de
+domínio e mensagens são em português.
 """
 
 from __future__ import annotations
@@ -9,21 +14,30 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from .tipos import TIPOS_DADO, validar_json_puro
 
-TipoParametro = Literal["texto", "numero", "booleano", "lista", "json", "selecao", "codigo"]
-Estado = Literal["aguardando", "executando", "concluido", "falhou", "ignorado"]
+TipoParametro = Literal[
+    "texto", "numero", "booleano", "lista", "json", "selecao", "codigo",
+    "regras",    # lista de comparações da Condição / Repetir até (editor próprio)
+    "portas",    # declaração de campos/entradas/saídas (Python inline, gatilho)
+    "variavel",  # escolhe uma variável já inicializada no fluxo
+]
+Estado = Literal["aguardando", "executando", "concluido", "falhou", "ignorado", "cancelado"]
+ExecutarApos = Literal["sucesso", "falhou", "ignorado", "expirou"]
 
 RE_ID_PORTA = re.compile(r"^[a-z_][a-z0-9_]{0,39}$")
-RE_ID_BLOCO = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+RE_ID_PASSO = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 RE_ID_TIPO = re.compile(r"^(builtin|custom)\.[a-z0-9_\-]{1,48}$")
 
-MAX_BLOCOS = 200
-MAX_CONEXOES = 600
+ID_GATILHO = "gatilho"
+MAX_PASSOS = 200
+MAX_PROFUNDIDADE = 8
 MAX_CODIGO = 64 * 1024
 MAX_VERSAO = 1_000_000
+MAX_PARTES = 60
+MAX_TENTATIVAS = 5
 
 
 class Estrito(BaseModel):
@@ -34,8 +48,8 @@ class Estrito(BaseModel):
 class TypeFrom(Estrito):
     """O tipo da porta/parâmetro depende de outro elemento do mesmo bloco."""
 
-    param: str | None = None  # usa o valor deste parâmetro (ex.: "tipo" da constante)
-    input: str | None = None  # herda o tipo da saída conectada a esta entrada
+    param: str | None = None  # usa o valor deste parâmetro (ex.: "tipo" da variável)
+    input: str | None = None  # herda o tipo do campo preenchido nesta entrada
 
 
 class Option(Estrito):
@@ -50,6 +64,23 @@ class VisibleWhen(Estrito):
     values: list[str]
 
 
+class SlotDef(Estrito):
+    """Uma lista de passos filhos de um contêiner (ex.: “Se sim” e “Se não” de uma condição)."""
+
+    id: str
+    label: str = Field(min_length=1, max_length=60)
+    # Passos de um espaço "transparente" continuam visíveis (para o conteúdo dinâmico) depois do contêiner.
+    transparent: bool = False
+    empty_hint: str = Field(default="", max_length=200)
+
+    @field_validator("id")
+    @classmethod
+    def _id(cls, v: str) -> str:
+        if not RE_ID_PORTA.match(v):
+            raise ValueError("identificador inválido")
+        return v
+
+
 class PortDef(Estrito):
     id: str
     label: str = Field(min_length=1, max_length=60)
@@ -57,7 +88,12 @@ class PortDef(Estrito):
     required: bool = True  # só faz sentido para entradas
     description: str = Field(default="", max_length=300)
     type_from: TypeFrom | None = None
-    conditional: bool = False  # saída que só existe quando o caminho é escolhido
+    # Legado do formato 1 (saídas condicionais). Mantido só para ler blocos gravados antes; nunca é usado.
+    conditional: bool = False
+    # Saída que só existe DENTRO do contêiner (ex.: o item atual do "Para cada").
+    inside: bool = False
+    # Valor inicial sugerido ao adicionar o bloco (entradas do gatilho, quantidade a incrementar…).
+    default: Any = None
 
     @field_validator("id")
     @classmethod
@@ -71,6 +107,12 @@ class PortDef(Estrito):
     def _tipo(cls, v: str) -> str:
         if v not in TIPOS_DADO:
             raise ValueError(f"tipo desconhecido: {v}")
+        return v
+
+    @field_validator("default")
+    @classmethod
+    def _padrao(cls, v: Any) -> Any:
+        validar_json_puro(v)
         return v
 
 
@@ -125,6 +167,11 @@ class BlockType(Estrito):
     params: list[ParamDef] = Field(default_factory=list, max_length=20)
     code: str | None = Field(default=None, max_length=MAX_CODIGO)
     created_at: str | None = None
+    # --- formato 2
+    slots: list[SlotDef] = Field(default_factory=list, max_length=4)  # contêiner se não vazio
+    inputs_from: str | None = None   # parâmetro ("portas") que declara as entradas deste passo
+    outputs_from: str | None = None  # parâmetro ("portas") que declara as saídas deste passo
+    trigger: bool = False            # gatilho: só pode ser o gatilho do fluxo, nunca um passo
 
     @field_validator("id")
     @classmethod
@@ -140,6 +187,10 @@ class BlockType(Estrito):
             raise ValueError("blocos Python precisam de código")
         return self
 
+    @property
+    def conteiner(self) -> bool:
+        return bool(self.slots)
+
     def input(self, port_id: str) -> PortDef | None:
         return next((p for p in self.inputs if p.id == port_id), None)
 
@@ -148,6 +199,9 @@ class BlockType(Estrito):
 
     def param(self, param_id: str) -> ParamDef | None:
         return next((p for p in self.params if p.id == param_id), None)
+
+    def slot(self, slot_id: str) -> SlotDef | None:
+        return next((s for s in self.slots if s.id == slot_id), None)
 
 
 class BlockDraft(Estrito):
@@ -174,30 +228,87 @@ class BlockDraft(Estrito):
         )
 
 
-# --------------------------------------------------------------------------- fluxo
-class Position(Estrito):
-    x: float
-    y: float
+# --------------------------------------------------------------------------- campos e conteúdo dinâmico
+class Ref(Estrito):
+    """Conteúdo dinâmico: a saída ``output`` do passo ``step`` (opcionalmente um caminho dentro dela)."""
+
+    step: str = Field(max_length=64)
+    output: str = Field(max_length=40)
+    path: str = Field(default="", max_length=200)  # ex.: endereco.cidade ou itens.0
 
 
-class Viewport(Estrito):
-    x: float = 0
-    y: float = 0
-    zoom: float = 1
+class Campo(Estrito):
+    """O valor de uma entrada: ``{"value": X}`` (valor fixo) ou ``{"parts": [...]}`` (conteúdo dinâmico).
+
+    Em ``parts``, textos soltos e referências se alternam, como os “chips” do Power Automate. Uma única
+    referência preserva o tipo do dado; qualquer outra combinação vira um texto.
+    """
+
+    value: Any = None
+    parts: list[str | Ref] | None = Field(default=None, max_length=MAX_PARTES)
+
+    @model_validator(mode="after")
+    def _um_dos_dois(self) -> "Campo":
+        tem_valor = "value" in self.model_fields_set
+        if tem_valor == (self.parts is not None):
+            raise ValueError("informe um valor fixo (value) ou conteúdo dinâmico (parts), e não os dois")
+        try:
+            validar_json_puro(self.value if tem_valor else [p for p in (self.parts or []) if isinstance(p, str)])
+        except ValueError as e:
+            raise ValueError(f"valor inválido: {e}") from None
+        return self
+
+    @model_serializer(mode="plain")
+    def _serializar(self) -> dict[str, Any]:
+        """Só a chave ativa: ``{"value": X}`` ou ``{"parts": [...]}`` (nunca as duas, para o dado reler igual)."""
+        if self.parts is not None:
+            return {"parts": [p if isinstance(p, str) else p.model_dump() for p in self.parts]}
+        return {"value": self.value}
+
+    @property
+    def dinamico(self) -> bool:
+        return self.parts is not None
+
+    def referencias(self) -> list[Ref]:
+        return [p for p in (self.parts or []) if isinstance(p, Ref)]
 
 
-class BlockInstance(Estrito):
+class Regra(Estrito):
+    """Uma comparação da Condição / Repetir até: ``esq`` <operador> ``dir`` (testes como “está vazio” não usam ``dir``)."""
+
+    esq: Campo
+    op: str = Field(max_length=20)
+    dir: Campo | None = None
+
+
+# --------------------------------------------------------------------------- passos e fluxo
+class Tentativas(Estrito):
+    count: int = Field(default=0, ge=0, le=MAX_TENTATIVAS)  # novas tentativas depois da primeira falha
+    interval_s: float = Field(default=2.0, ge=0, le=30)
+
+
+class Configuracoes(Estrito):
+    retry: Tentativas = Field(default_factory=Tentativas)
+    timeout_s: float | None = Field(default=None, gt=0, le=3600)  # só vale para código Python
+
+
+class Passo(Estrito):
     id: str
     type: str = Field(max_length=80)
     version: int = Field(ge=1, le=MAX_VERSAO)
-    position: Position
-    params: dict[str, Any] = Field(default_factory=dict)
     label: str | None = Field(default=None, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
+    inputs: dict[str, Campo] = Field(default_factory=dict, max_length=40)
+    params: dict[str, Any] = Field(default_factory=dict)
+    # Em quais situações do passo anterior (da mesma lista) este passo roda. Padrão: só se teve sucesso.
+    run_after: list[ExecutarApos] = Field(default_factory=lambda: ["sucesso"], min_length=1, max_length=4)
+    settings: Configuracoes = Field(default_factory=Configuracoes)
+    slots: dict[str, list["Passo"]] = Field(default_factory=dict, max_length=4)
 
     @field_validator("id")
     @classmethod
     def _id(cls, v: str) -> str:
-        if not RE_ID_BLOCO.match(v):
+        if not RE_ID_PASSO.match(v):
             raise ValueError("identificador inválido (use letras, números, _ e -)")
         return v
 
@@ -211,53 +322,76 @@ class BlockInstance(Estrito):
             raise ValueError(f"configuração inválida: {e}") from None
         return v
 
-
-class Endpoint(Estrito):
-    block: str
-    port: str
-
-
-class Connection(Estrito):
-    id: str
-    source: Endpoint
-    target: Endpoint
-
-    @field_validator("id")
+    @field_validator("run_after")
     @classmethod
-    def _id(cls, v: str) -> str:
-        if not RE_ID_BLOCO.match(v):
-            raise ValueError("identificador inválido (use letras, números, _ e -)")
+    def _sem_repetidos(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("situações repetidas em “executar após”")
+        return v
+
+    @field_validator("inputs")
+    @classmethod
+    def _ids_das_entradas(cls, v: dict[str, Campo]) -> dict[str, Campo]:
+        for chave in v:
+            if not RE_ID_PORTA.match(chave):
+                raise ValueError(f"identificador de entrada inválido: {chave!r}")
+        return v
+
+    @field_validator("slots")
+    @classmethod
+    def _ids_dos_espacos(cls, v: dict[str, list["Passo"]]) -> dict[str, list["Passo"]]:
+        for chave in v:
+            if not RE_ID_PORTA.match(chave):
+                raise ValueError(f"identificador de espaço inválido: {chave!r}")
         return v
 
 
+Passo.model_rebuild()
+
+
+def gatilho_padrao() -> Passo:
+    return Passo(id=ID_GATILHO, type="builtin.gatilho_manual", version=1, params={"campos": []})
+
+
 class Flow(Estrito):
-    schema_version: int = 1
-    blocks: list[BlockInstance] = Field(default_factory=list, max_length=MAX_BLOCOS)
-    connections: list[Connection] = Field(default_factory=list, max_length=MAX_CONEXOES)
-    viewport: Viewport | None = None
+    schema_version: int = 2
+    trigger: Passo = Field(default_factory=gatilho_padrao)
+    steps: list[Passo] = Field(default_factory=list, max_length=MAX_PASSOS)
 
     @field_validator("schema_version")
     @classmethod
     def _versao(cls, v: int) -> int:
-        if v != 1:
+        if v != 2:
             raise ValueError(f"versão de formato {v} não é suportada por esta versão da Trama")
         return v
 
-    def bloco(self, block_id: str) -> BlockInstance | None:
-        return next((b for b in self.blocks if b.id == block_id), None)
+    @model_validator(mode="after")
+    def _limites(self) -> "Flow":
+        total = 0
+        pilha: list[tuple[list[Passo], int]] = [(self.steps, 1)]
+        while pilha:
+            lista, nivel = pilha.pop()
+            if nivel > MAX_PROFUNDIDADE:
+                raise ValueError(f"os passos estão aninhados demais (máximo de {MAX_PROFUNDIDADE} níveis)")
+            for p in lista:
+                total += 1
+                if total > MAX_PASSOS:
+                    raise ValueError(f"o fluxo tem passos demais (máximo de {MAX_PASSOS})")
+                for filhos in p.slots.values():
+                    pilha.append((filhos, nivel + 1))
+        if self.trigger.slots:
+            raise ValueError("o gatilho não pode ter passos dentro dele")
+        return self
 
 
 # --------------------------------------------------------------------------- validação
 class Issue(BaseModel):
     code: str
     severity: Literal["erro", "aviso"] = "erro"
-    # "estrutura": impede salvar/conectar (ciclo, tipos incompatíveis, ligação inválida);
-    # "configuracao": rascunho salvável, mas impede a execução (campo obrigatório etc.).
+    # "estrutura": impede salvar (ids repetidos, aninhamento inválido…);
+    # "configuracao": rascunho salvável, mas impede a execução (campo obrigatório, conteúdo dinâmico inválido…).
     scope: Literal["estrutura", "configuracao"] = "configuracao"
     message: str
     hint: str | None = None
-    block_id: str | None = None
-    port: str | None = None
-    param: str | None = None
-    connection_id: str | None = None
-    connection_ids: list[str] = Field(default_factory=list)
+    step_id: str | None = None
+    field: str | None = None  # entrada ou parâmetro com o problema

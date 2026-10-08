@@ -58,8 +58,8 @@ def _montar(settings, executor):
     registro = Registro(store)
     motor = Motor(store, executor, registro, settings.limites)
 
-    def executar(flow: dict, dados_iniciais: dict | None = None) -> dict:
-        run_id = motor.preparar(Flow.model_validate(flow), None, dados_iniciais)
+    def executar(flow: dict, dados_gatilho: dict | None = None) -> dict:
+        run_id = motor.preparar(Flow.model_validate(flow), None, dados_gatilho)
         motor.rodar(run_id)
         return store.obter_execucao(run_id)
 

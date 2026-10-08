@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,12 +14,13 @@ from . import custom_blocks, exchange
 from .config import Settings
 from .engine import Motor
 from .errors import ApiError
-from .models import BlockDraft, Connection, Flow
+from .models import BlockDraft, Flow
+from .passos import percorrer
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store
 from .tipos import exemplo_do_tipo, validar_json_puro
-from .validation import analisar, verificar_conexao
+from .validation import analisar
 
 
 @dataclass
@@ -51,11 +53,6 @@ class FluxoEntrada(Entrada):
     flow: Flow
 
 
-class ConexaoEntrada(Entrada):
-    flow: Flow
-    connection: Connection
-
-
 class ExportarEntrada(Entrada):
     name: str = Field(default="Fluxo", max_length=120)
     description: str = Field(default="", max_length=1000)
@@ -72,9 +69,9 @@ def _json_puro(v: Any) -> Any:
 
 class ExecucaoEntrada(Entrada):
     flow: Flow | None = None  # se omitido, usa o fluxo salvo
-    initial_data: dict[str, dict[str, Any]] | None = None
+    trigger_inputs: dict[str, Any] | None = None  # valores dos campos do gatilho nesta execução
 
-    _conferir = field_validator("initial_data")(_json_puro)
+    _conferir = field_validator("trigger_inputs")(_json_puro)
 
 
 class CodigoEntrada(Entrada):
@@ -165,7 +162,7 @@ def criar_router(s: Servicos) -> APIRouter:
 
     # ----------------------------------------------------------------- projetos
     def _checar_estrutura(flow: Flow) -> None:
-        analise = analisar(flow, s.registro.resolver)
+        analise = analisar(flow, s.registro.resolver, limites=s.settings.limites)
         if analise.erros_de_estrutura:
             raise ApiError(422, "fluxo_invalido",
                            "O fluxo não foi salvo porque tem problemas na estrutura. O último fluxo salvo foi mantido.",
@@ -190,7 +187,8 @@ def criar_router(s: Servicos) -> APIRouter:
     @r.post("/projetos/importar/validar")
     def validar_importacao(corpo: dict[str, Any]) -> dict[str, Any]:
         res = exchange.importar(s.store, s.registro, corpo, aplicar=False)
-        return {"name": res["name"], "block_count": len(res["flow"]["blocks"]), "warnings": res["warnings"]}
+        return {"name": res["name"], "step_count": sum(1 for _ in percorrer(Flow.model_validate(res["flow"]).steps)),
+                "warnings": res["warnings"]}
 
     @r.get("/projetos/{pid}")
     def obter_projeto(pid: str) -> dict[str, Any]:
@@ -215,13 +213,8 @@ def criar_router(s: Servicos) -> APIRouter:
     @r.post("/fluxos/validar")
     def validar(corpo: FluxoEntrada) -> dict[str, Any]:
         a = analisar(corpo.flow, s.registro.resolver, sandbox=s.executor.status(),
-                     ultima_versao=s.registro.ultima_versao)
+                     ultima_versao=s.registro.ultima_versao, limites=s.settings.limites)
         return {"valid": not a.erros, "issues": [i.model_dump() for i in a.issues], "port_types": a.port_types}
-
-    @r.post("/fluxos/validar-conexao")
-    def validar_conexao(corpo: ConexaoEntrada) -> dict[str, Any]:
-        problemas = verificar_conexao(corpo.flow, corpo.connection, s.registro.resolver)
-        return {"ok": not problemas, "issues": [i.model_dump() for i in problemas]}
 
     @r.post("/fluxos/exportar")
     def exportar(corpo: ExportarEntrada) -> dict[str, Any]:
@@ -237,7 +230,7 @@ def criar_router(s: Servicos) -> APIRouter:
             flow = corpo.flow or Flow.model_validate(projeto["flow"])
         except ValidationError:
             raise ApiError(422, "fluxo_invalido", "O fluxo salvo está corrompido.") from None
-        run_id = s.motor.preparar(flow, pid, corpo.initial_data)
+        run_id = s.motor.preparar(flow, pid, corpo.trigger_inputs)
         s.motor.despachar(run_id)
         return s.store.obter_execucao(run_id)  # type: ignore[return-value]
 
@@ -253,6 +246,31 @@ def criar_router(s: Servicos) -> APIRouter:
         if e is None:
             raise ApiError(404, "execucao_nao_encontrada", "Execução não encontrada.")
         return e
+
+    @r.post("/execucoes/{rid}/cancelar", status_code=202)
+    def cancelar_execucao(rid: str) -> dict[str, Any]:
+        e = s.store.obter_execucao(rid)
+        if e is None:
+            raise ApiError(404, "execucao_nao_encontrada", "Execução não encontrada.")
+        if not s.motor.cancelar(rid):
+            raise ApiError(409, "execucao_encerrada", "Esta execução já terminou, então não há o que cancelar.")
+        return {"cancelling": True}
+
+    # ------------------------------------------------------------------- modelos
+    @r.get("/modelos")
+    def modelos() -> list[dict[str, Any]]:
+        """Fluxos prontos (arquivos de exportação da pasta de exemplos), para começar de um modelo."""
+        pasta = s.settings.pasta_exemplos
+        saida: list[dict[str, Any]] = []
+        for arquivo in sorted(pasta.glob("*.json")) if pasta.is_dir() else []:
+            try:
+                env = json.loads(arquivo.read_text(encoding="utf-8"))
+                fluxo = Flow.model_validate(env["flow"])
+                saida.append({"id": arquivo.stem, "name": env["project"]["name"], "description": env["project"]["description"],
+                              "step_count": sum(1 for _ in percorrer(fluxo.steps)), "file": env})
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return saida
 
     return r
 

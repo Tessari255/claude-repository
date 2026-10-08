@@ -1,105 +1,125 @@
 {
   "format": "trama.fluxo",
-  "format_version": 1,
+  "format_version": 2,
   "exported_at": "2026-10-08T00:00:00Z",
   "project": {
-    "name": "Exemplo 2 — Soma de dois valores",
-    "description": "Dois valores constantes alimentam uma operação de soma. O resultado esperado é 5."
+    "name": "Exemplo 2 — Soma de dois números",
+    "description": "Dois números entram pelo gatilho e uma operação matemática os soma. Esperado: 5."
   },
   "flow": {
-    "schema_version": 1,
-    "blocks": [
-      {
-        "id": "a",
-        "type": "builtin.constante",
-        "version": 1,
-        "position": {
-          "x": 0,
-          "y": 0
-        },
-        "params": {
-          "tipo": "numero",
-          "valor": 2
-        },
-        "label": "Valor A"
+    "schema_version": 2,
+    "trigger": {
+      "id": "gatilho",
+      "type": "builtin.gatilho_manual",
+      "version": 1,
+      "label": null,
+      "note": null,
+      "inputs": {},
+      "params": {
+        "campos": [
+          {
+            "id": "a",
+            "label": "Primeiro número",
+            "type": "numero",
+            "required": true,
+            "default": 2
+          },
+          {
+            "id": "b",
+            "label": "Segundo número",
+            "type": "numero",
+            "required": true,
+            "default": 3
+          }
+        ]
       },
-      {
-        "id": "b",
-        "type": "builtin.constante",
-        "version": 1,
-        "position": {
-          "x": 0,
-          "y": 200
+      "run_after": [
+        "sucesso"
+      ],
+      "settings": {
+        "retry": {
+          "count": 0,
+          "interval_s": 2.0
         },
-        "params": {
-          "tipo": "numero",
-          "valor": 3
-        },
-        "label": "Valor B"
+        "timeout_s": null
       },
+      "slots": {}
+    },
+    "steps": [
       {
         "id": "soma",
         "type": "builtin.matematica",
         "version": 1,
-        "position": {
-          "x": 320,
-          "y": 80
+        "label": "Somar",
+        "note": null,
+        "inputs": {
+          "a": {
+            "parts": [
+              {
+                "step": "gatilho",
+                "output": "a",
+                "path": ""
+              }
+            ]
+          },
+          "b": {
+            "parts": [
+              {
+                "step": "gatilho",
+                "output": "b",
+                "path": ""
+              }
+            ]
+          }
         },
         "params": {
           "operacao": "somar"
         },
-        "label": null
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
       },
       {
-        "id": "saida",
+        "id": "resultado",
         "type": "builtin.saida",
         "version": 1,
-        "position": {
-          "x": 640,
-          "y": 80
+        "label": null,
+        "note": null,
+        "inputs": {
+          "valor": {
+            "parts": [
+              {
+                "step": "soma",
+                "output": "resultado",
+                "path": ""
+              }
+            ]
+          }
         },
         "params": {
           "titulo": "Soma"
         },
-        "label": null
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
       }
-    ],
-    "connections": [
-      {
-        "id": "c1",
-        "source": {
-          "block": "a",
-          "port": "valor"
-        },
-        "target": {
-          "block": "soma",
-          "port": "a"
-        }
-      },
-      {
-        "id": "c2",
-        "source": {
-          "block": "b",
-          "port": "valor"
-        },
-        "target": {
-          "block": "soma",
-          "port": "b"
-        }
-      },
-      {
-        "id": "c3",
-        "source": {
-          "block": "soma",
-          "port": "resultado"
-        },
-        "target": {
-          "block": "saida",
-          "port": "valor"
-        }
-      }
-    ],
-    "viewport": null
+    ]
   },
   "custom_blocks": []
 }
