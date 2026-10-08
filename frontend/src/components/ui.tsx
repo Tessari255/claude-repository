@@ -234,9 +234,13 @@ export function MenuDeAcoes({ rotulo, itens, classe }: { rotulo: string; itens: 
     setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(window.innerWidth - largura - 8, r.right - largura)) })
   }, [aberto])
 
+  // o menu só existe depois que a posição é calculada; só então o foco pode ir para o primeiro item
+  useEffect(() => {
+    if (aberto && pos) lista.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus()
+  }, [aberto, pos])
+
   useEffect(() => {
     if (!aberto) return
-    lista.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus()
     const fora = (e: MouseEvent) => {
       const alvo = e.target as Node
       if (!lista.current?.contains(alvo) && !botao.current?.contains(alvo)) setAberto(false)
@@ -254,6 +258,7 @@ export function MenuDeAcoes({ rotulo, itens, classe }: { rotulo: string; itens: 
 
   function fechar(devolverFoco = true) {
     setAberto(false)
+    setPos(null)
     if (devolverFoco) botao.current?.focus()
   }
 

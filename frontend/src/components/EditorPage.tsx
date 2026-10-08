@@ -471,7 +471,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
               flow={flow} defDe={defDe} selecionadoId={selecionadoId} destinoAtivo={painelAtual === 'adicionar' ? destino : null}
               onSelecionar={selecionar} onAdicionar={abrirSeletor} onAcao={acao} problemas={somenteLeitura ? [] : analise.issues}
               run={runVisivel} somenteLeitura={somenteLeitura} iteracoes={iteracoes}
-              onIteracao={(k, n) => setIteracoes((m) => ({ ...m, [k]: n }))}
+              onIteracao={(k, n) => setIteracoes((m) => ({ ...m, [k]: n }))} ultimasVersoes={ultimasVersoes}
             />
           </ErrorBoundary>
         </main>

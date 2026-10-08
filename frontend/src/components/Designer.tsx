@@ -23,6 +23,8 @@ export interface DesignerProps {
   somenteLeitura: boolean
   iteracoes: Record<string, number>
   onIteracao: (chave: string, n: number) => void
+  /** Última versão de cada bloco Python da biblioteca (para avisar que existe uma mais nova). */
+  ultimasVersoes: Map<string, number>
 }
 
 type Contexto = DesignerProps & { porId: Map<string, Passo> }
@@ -80,7 +82,7 @@ function Conector({ destino, rotulo, final }: { destino: Destino; rotulo: string
       <span className="conector-linha" aria-hidden="true" />
       {!c.somenteLeitura && (
         final && destino.paiId === null ? (
-          <button type="button" className={`btn novo-passo${ativo ? ' ativo' : ''}`} aria-label={rotulo} onClick={() => c.onAdicionar(destino)}>
+          <button type="button" className={`btn novo-passo${ativo ? ' ativo' : ''}`} aria-label={`Novo passo. ${rotulo}`} onClick={() => c.onAdicionar(destino)}>
             <Icon name="plus" size={16} /> Novo passo
           </button>
         ) : (
@@ -213,6 +215,11 @@ function CartaoBase({
         {!gatilho && indice > 0 && !executarAposPadrao(passo) && (
           <span className="etiqueta" title="Este passo só roda em certas situações do passo anterior">
             Executar após: {(passo.run_after ?? []).map((r) => ROTULO_EXECUTAR_APOS[r]).join(' ou ')}
+          </span>
+        )}
+        {def.kind === 'python' && (
+          <span className="etiqueta" title="Versão do bloco fixada neste fluxo">
+            v{passo.version}{(c.ultimasVersoes.get(def.id) ?? 0) > passo.version && ` · existe a v${c.ultimasVersoes.get(def.id)}`}
           </span>
         )}
         {tentativas > 0 && <span className="etiqueta"><Icon name="retry" size={12} /> {tentativas} {tentativas === 1 ? 'nova tentativa' : 'novas tentativas'}</span>}
