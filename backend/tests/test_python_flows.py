@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from pydantic import ValidationError
 
 from app import custom_blocks
 from app.config import Limites
@@ -213,9 +214,9 @@ def test_salvar_bloco_com_erro_de_sintaxe_ou_sem_run_e_recusado_com_a_linha(com_
 
 
 def test_declaracao_do_bloco_e_validada(com_docker):
-    with pytest.raises(Exception):  # id de porta inválido
+    with pytest.raises(ValidationError):  # id de porta inválido
         declarar("def run(i, p):\n    return {}", saidas=[{"id": "Mensagem Ruim", "label": "x", "type": "texto"}])
-    with pytest.raises(Exception):  # ids repetidos
+    with pytest.raises(ValidationError):  # ids repetidos
         declarar("def run(i, p):\n    return {}", entradas=[{"id": "a", "label": "A"}, {"id": "a", "label": "B"}])
     with pytest.raises(ApiError):  # sem nenhuma saída
         custom_blocks.criar_bloco(com_docker.store, com_docker.executor, declarar("def run(i, p):\n    return {}", saidas=[]))

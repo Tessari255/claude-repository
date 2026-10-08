@@ -176,6 +176,7 @@ class DockerExecutor:
             "--network", "none",
             "--read-only",
             "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m",
+            "--shm-size", "16m",
             "--memory", f"{mem}m", "--memory-swap", f"{mem}m",
             "--cpus", str(limites.cpus),
             "--pids-limit", str(limites.max_processos),

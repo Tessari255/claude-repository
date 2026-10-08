@@ -157,6 +157,74 @@ def test_so_existe_a_interface_de_loopback(executor):
     assert r.payload["outputs"]["interfaces"] == ["lo"]
 
 
+def test_limites_de_recursos_estao_aplicados_no_cgroup_do_contêiner(executor):
+    """Lê, de dentro do contêiner, os limites que o kernel realmente aplica (cgroup v1 ou v2)."""
+    codigo = BYPASS + (
+        "def run(inputs, params):\n"
+        "    os = real('os')\n"
+        "    def ler(*caminhos):\n"
+        "        for c in caminhos:\n"
+        "            try:\n"
+        "                return open(c).read().strip()\n"
+        "            except OSError:\n"
+        "                pass\n"
+        "    return {\n"
+        "      'memoria': ler('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'),\n"
+        "      'swap': ler('/sys/fs/cgroup/memory.swap.max', '/sys/fs/cgroup/memory/memory.memsw.limit_in_bytes'),\n"
+        "      'pids': ler('/sys/fs/cgroup/pids.max', '/sys/fs/cgroup/pids/pids.max'),\n"
+        "      'cpu': ler('/sys/fs/cgroup/cpu.max', '/sys/fs/cgroup/cpu/cpu.cfs_quota_us'),\n"
+        "    }\n"
+    )
+    r = rodar(executor, codigo, memoria_mb=128)
+    assert r.ok, r.error
+    c = r.payload["outputs"]
+    assert int(c["memoria"]) == (128 + 64) * 1024 * 1024          # limite de memória (com folga do interpretador)
+    assert c["swap"] in ("0", str((128 + 64) * 1024 * 1024))       # sem swap extra
+    assert int(c["pids"]) == LIMITES_TESTE.max_processos            # no máximo N processos/threads
+    assert c["cpu"].split()[0] == str(int(LIMITES_TESTE.cpus * 100000))  # cota de CPU (1 CPU = 100000 µs por 100000)
+
+
+def test_sem_capacidades_sem_novos_privilegios_e_com_seccomp(executor):
+    codigo = BYPASS + (
+        "def run(inputs, params):\n"
+        "    campos = {}\n"
+        "    for linha in open('/proc/self/status'):\n"
+        "        k, _, v = linha.partition(':')\n"
+        "        if k in ('CapEff', 'CapPrm', 'CapBnd', 'NoNewPrivs', 'Seccomp'):\n"
+        "            campos[k] = v.strip()\n"
+        "    return campos\n"
+    )
+    r = rodar(executor, codigo)
+    assert r.ok, r.error
+    c = r.payload["outputs"]
+    assert int(c["CapEff"], 16) == 0 and int(c["CapPrm"], 16) == 0 and int(c["CapBnd"], 16) == 0  # --cap-drop ALL
+    assert c["NoNewPrivs"] == "1"
+    assert c["Seccomp"] == "2"  # filtro seccomp padrão do Docker ativo
+
+
+def test_bomba_de_processos_e_contida_pelo_limite_de_pids(executor):
+    codigo = BYPASS + (
+        "def run(inputs, params):\n"
+        "    os = real('os')\n"
+        "    filhos = 0\n"
+        "    for _ in range(500):\n"
+        "        try:\n"
+        "            pid = os.fork()\n"
+        "        except OSError:\n"
+        "            break\n"
+        "        if pid == 0:\n"
+        "            real('time').sleep(30)\n"
+        "            os._exit(0)\n"
+        "        filhos += 1\n"
+        "    return {'filhos': filhos}\n"
+    )
+    r = rodar(executor, codigo, tempo_s=8)
+    assert r.ok, r.error
+    assert 0 < r.payload["outputs"]["filhos"] < LIMITES_TESTE.max_processos  # o kernel recusou o resto
+    vivos = subprocess.run(["docker", "ps", "-q", "--filter", "label=trama.executor=1"], capture_output=True, text=True).stdout.split()
+    assert vivos == []  # e nada sobrou rodando depois
+
+
 def test_sistema_de_arquivos_somente_leitura_e_usuario_sem_privilegios(executor):
     codigo = BYPASS + (
         "def run(inputs, params):\n"

@@ -70,7 +70,7 @@ def importar(store: Store, registro: Registro, bruto: Any, *, aplicar: bool = Tr
         env = Envelope.model_validate(bruto)
     except ValidationError as e:
         raise ApiError(422, "arquivo_invalido", "O conteúdo do arquivo não é um fluxo válido da Trama.",
-                       problemas=erros_pydantic(e), sugestao="Escolha um arquivo .json exportado pela própria Trama.")
+                       problemas=erros_pydantic(e), sugestao="Escolha um arquivo .json exportado pela própria Trama.") from None
 
     avisos: list[str] = []
     for t in env.custom_blocks:

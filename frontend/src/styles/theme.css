@@ -343,6 +343,8 @@ pre.valor, pre.log {
 .editor-bloco { display: grid; grid-template-columns: minmax(340px, 5fr) minmax(380px, 6fr); gap: 22px; align-items: start; }
 .titulo-com-acao { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .editor-codigo { margin-bottom: 4px; }
+.editor-codigo > .cm-editor { min-height: inherit; max-height: inherit; }
+.editor-codigo .cm-scroller { overflow: auto; }
 .problemas-locais { list-style: none; padding: 0; margin: 10px 0 0; color: var(--tijolo); font-size: 13px; }
 .problemas-locais li { display: flex; gap: 6px; align-items: center; margin-bottom: 3px; }
 .resultado-teste { margin-top: 12px; }

@@ -318,7 +318,7 @@ class Motor:
                 texto = json.dumps(valor, ensure_ascii=False)
             except (ValueError, TypeError) as e:
                 raise ErroBloco(f"A saída “{porta.label}” não pode ser convertida para JSON: {e}.",
-                                codigo="retorno_invalido", sugestao=_SUGESTOES["retorno_invalido"])
+                                codigo="retorno_invalido", sugestao=_SUGESTOES["retorno_invalido"]) from None
             if len(texto.encode("utf-8")) > self.limites.valor_max:
                 raise ErroBloco(
                     f"A saída “{porta.label}” é grande demais (limite de {self.limites.valor_max // 1024} KB).",

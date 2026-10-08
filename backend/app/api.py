@@ -222,7 +222,7 @@ def criar_router(s: Servicos) -> APIRouter:
         try:
             flow = corpo.flow or Flow.model_validate(projeto["flow"])
         except ValidationError:
-            raise ApiError(422, "fluxo_invalido", "O fluxo salvo está corrompido.")
+            raise ApiError(422, "fluxo_invalido", "O fluxo salvo está corrompido.") from None
         run_id = s.motor.preparar(flow, pid, corpo.initial_data)
         s.motor.despachar(run_id)
         return s.store.obter_execucao(run_id)  # type: ignore[return-value]

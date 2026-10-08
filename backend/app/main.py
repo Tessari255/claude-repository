@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
@@ -78,8 +79,10 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
         yield
         motor.encerrar()
 
-    app = FastAPI(title="Trama", version="0.1.0", lifespan=ciclo_de_vida,
-                  docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
+    # A documentação interativa carrega assets de um CDN externo no navegador; fica desligada por padrão.
+    docs = os.environ.get("TRAMA_DOCS") == "1"
+    app = FastAPI(title="Trama", version="0.1.0", lifespan=ciclo_de_vida, redoc_url=None,
+                  docs_url="/api/docs" if docs else None, openapi_url="/api/openapi.json" if docs else None)
     app.state.servicos = servicos
     app.add_middleware(ProtecaoLocal, origens_permitidas=set(settings.origens_permitidas))
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.hosts_permitidos))

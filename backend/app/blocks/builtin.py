@@ -121,9 +121,9 @@ def _potencia(a, b):
     try:
         r = float(a) ** float(b)
     except OverflowError:
-        raise ErroBloco("O resultado da potência é grande demais.", codigo="resultado_invalido")
+        raise ErroBloco("O resultado da potência é grande demais.", codigo="resultado_invalido") from None
     except ZeroDivisionError:
-        raise ErroBloco("Zero não pode ser elevado a um expoente negativo.", codigo="divisao_por_zero")
+        raise ErroBloco("Zero não pode ser elevado a um expoente negativo.", codigo="divisao_por_zero") from None
     if isinstance(r, complex):
         raise ErroBloco("Não existe resultado real para essa potência (raiz de número negativo).",
                         codigo="resultado_invalido")
@@ -156,7 +156,7 @@ def _matematica(inputs, params, ctx):
         else:  # protegido pela validação do parâmetro
             raise ErroBloco(f"Operação desconhecida: {op}.", codigo="parametro_invalido")
     except OverflowError:
-        raise ErroBloco("O resultado é grande demais para ser representado.", codigo="resultado_invalido")
+        raise ErroBloco("O resultado é grande demais para ser representado.", codigo="resultado_invalido") from None
     return {"resultado": _numero(r)}
 
 
@@ -207,7 +207,7 @@ def _selecionar_campos(inputs, params, ctx):
                 codigo="campo_ausente",
                 sugestao=f"Campos disponíveis no primeiro nível: {disponiveis}. "
                          "Use ponto para campos internos (ex.: endereco.cidade) e números para listas (ex.: itens.0).",
-            )
+            ) from None
     return {"valor": selecionados[caminhos[0]], "selecionados": selecionados}
 
 
@@ -326,7 +326,7 @@ def _aplicar_item(op: str, item: Any, indice: int, params: dict[str, Any]) -> An
         try:
             return buscar_caminho(item, str(params["campo"]))
         except (KeyError, IndexError, ValueError, TypeError):
-            raise falha(f"o campo “{params['campo']}” não existe neste item.")
+            raise falha(f"o campo “{params['campo']}” não existe neste item.") from None
     raise ErroBloco(f"Operação desconhecida: {op}.", codigo="parametro_invalido")
 
 
