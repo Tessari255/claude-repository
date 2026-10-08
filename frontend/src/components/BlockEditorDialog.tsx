@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import { valorPadraoDoTipo } from '../lib/flow'
 import { ROTULO_TIPO_LONGO, slugDeId } from '../lib/visual'
@@ -14,7 +14,8 @@ const TIPOS: TipoDado[] = ['texto', 'numero', 'booleano', 'lista', 'json', 'qual
 const TIPOS_PARAM: TipoParametro[] = ['texto', 'numero', 'booleano', 'lista', 'json']
 
 interface LinhaPorta { id: string; label: string; type: TipoDado; required: boolean; description: string; idAuto: boolean }
-interface LinhaParam { id: string; label: string; type: TipoParametro; required: boolean; default: unknown; help: string; idAuto: boolean }
+// `original` guarda a definição completa (opções de seleção, faixa, visibilidade…) para não perder o que o editor não edita.
+interface LinhaParam { id: string; label: string; type: TipoParametro; required: boolean; default: unknown; help: string; idAuto: boolean; original?: ParamDef }
 
 const CODIGO_INICIAL = `def run(inputs: dict, params: dict) -> dict:
     # inputs: os dados que chegam pelas conexões, pelo nome de cada entrada.
@@ -43,9 +44,10 @@ function dePorta(p: PortDef): LinhaPorta {
   return { id: p.id, label: p.label, type: p.type, required: p.required, description: p.description, idAuto: false }
 }
 function deParam(p: ParamDef): LinhaParam {
-  return { id: p.id, label: p.label, type: (p.type === 'selecao' || p.type === 'codigo' ? 'texto' : p.type) as TipoParametro,
-    required: p.required, default: p.default, help: p.help, idAuto: false }
+  return { id: p.id, label: p.label, type: p.type, required: p.required, default: p.default, help: p.help, idAuto: false, original: p }
 }
+
+const PARAM_PADRAO = { options: [], placeholder: '', multiline: false, allow_empty: false, min: null, max: null, type_from: null, visible_when: null } as const
 
 function problemasDeIds(linhas: { id: string }[], rotulo: string): string[] {
   const out: string[] = []
@@ -88,6 +90,7 @@ export function BlockEditorDialog({
   const [falha, setFalha] = useState<{ mensagem: string; issues: Issue[]; sugestao?: string | null } | null>(null)
   const [linhaErro, setLinhaErro] = useState<number | null>(null)
   const [confirmarExcluir, setConfirmarExcluir] = useState(false)
+  const [confirmarDescartar, setConfirmarDescartar] = useState(false)
 
   const problemasLocais = useMemo(() => {
     const p: string[] = []
@@ -100,15 +103,28 @@ export function BlockEditorDialog({
     return p
   }, [nome, entradas, saidas, params])
 
+  const instantaneo = JSON.stringify([nome, descricao, categoria, entradas, saidas, params, codigo])
+  const inicial = useRef(instantaneo)
+  const alterado = instantaneo !== inicial.current
+
+  /** Fechar sem salvar (Esc, X, Cancelar) pede confirmação se houver alterações: nome, portas e código não se perdem sem aviso. */
+  function fechar() {
+    if (alterado) setConfirmarDescartar(true)
+    else onClose()
+  }
+
   function rascunho(): BlockDraft {
     return {
       name: nome.trim(), description: descricao.trim(), category: categoria.trim() || 'Personalizados', code: codigo,
       inputs: entradas.map((e) => ({ id: e.id, label: e.label.trim(), type: e.type, required: e.required, description: e.description, conditional: false })),
       outputs: saidas.map((s) => ({ id: s.id, label: s.label.trim(), type: s.type, required: true, description: s.description, conditional: false })),
-      params: params.map((p) => ({
-        id: p.id, label: p.label.trim(), type: p.type, required: p.required, default: p.default ?? null, options: [], help: p.help,
-        placeholder: '', multiline: false, allow_empty: false, min: null, max: null,
-      })),
+      params: params.map((p) => {
+        const base = p.original ?? PARAM_PADRAO
+        return {
+          ...base, id: p.id, label: p.label.trim(), type: p.type, required: p.required, default: p.default ?? null, help: p.help,
+          options: p.type === 'selecao' ? [...base.options] : [],
+        }
+      }),
     }
   }
 
@@ -171,13 +187,13 @@ export function BlockEditorDialog({
   const proxima = editar ? 'uma nova versão' : 'a v1'
 
   return (
-    <Dialog titulo={titulo} onClose={onClose} tela
+    <Dialog titulo={titulo} onClose={fechar} tela fecharAoClicarFora={false}
       descricao={editar
         ? `Você está editando a v${baseVersao ?? editar.version}. Ao salvar, será criada ${proxima} na biblioteca; fluxos que já usam outra versão continuam nela, sem mudar.`
         : 'Declare as entradas, saídas e parâmetros, escreva a função run e teste com dados de exemplo antes de salvar na biblioteca.'}
       rodape={<>
         {editar && <button className="btn btn-perigo-suave rodape-esquerda" onClick={() => setConfirmarExcluir(true)}><Icon name="trash" size={16} /> Excluir bloco</button>}
-        <button className="btn" onClick={onClose}>Cancelar</button>
+        <button className="btn" onClick={fechar}>Cancelar</button>
         <button className="btn btn-primario" onClick={salvar} disabled={salvando || problemasLocais.length > 0}
           title={problemasLocais[0]}>
           <Icon name="save" size={16} /> {salvando ? 'Salvando…' : editar ? 'Salvar nova versão' : 'Salvar na biblioteca'}
@@ -239,9 +255,12 @@ export function BlockEditorDialog({
                   <div className="campo"><label htmlFor={`pt-${i}`}>Tipo</label>
                     <select id={`pt-${i}`} value={p.type} onChange={(e) => atualizarLinha(params, setParams, i, { type: e.target.value as TipoParametro, default: null })}>
                       {TIPOS_PARAM.map((t) => <option key={t} value={t}>{ROTULO_TIPO_LONGO[t as TipoDado]}</option>)}
+                      {p.original?.type === 'selecao' && <option value="selecao">Seleção (opções fixas)</option>}
+                      {p.original?.type === 'codigo' && <option value="codigo">Código</option>}
                     </select></div>
                   <div className="campo">
                     <ValueField tipo={p.type} rotulo="Valor padrão" valor={p.default ?? valorPadraoDoTipo(p.type)} key={`${i}-${p.type}`}
+                      opcoes={p.original?.options}
                       onChange={(v) => atualizarLinha(params, setParams, i, { default: v })} />
                   </div>
                 </div>
@@ -306,6 +325,11 @@ export function BlockEditorDialog({
           {run && <ResultadoDoTeste run={run} />}
         </div>
       </div>
+      {confirmarDescartar && (
+        <Confirmar titulo="Descartar as alterações?" rotuloConfirmar="Descartar" perigo
+          mensagem="Você mudou este bloco e ainda não salvou. Se fechar agora, o que foi digitado (nome, portas e código) será perdido."
+          onConfirmar={onClose} onCancelar={() => setConfirmarDescartar(false)} />
+      )}
       {confirmarExcluir && (
         <Confirmar titulo="Excluir este bloco?" rotuloConfirmar="Excluir bloco" perigo
           mensagem="O bloco e todas as suas versões serão removidos da biblioteca. Se algum projeto ainda o usa, a exclusão é recusada."

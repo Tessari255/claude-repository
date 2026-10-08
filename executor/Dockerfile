@@ -20,4 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # --network none, --cap-drop ALL e limites de recursos em cada execução.
 USER 65534:65534
 WORKDIR /tmp
-ENTRYPOINT ["python", "-I", "/opt/trama/runner.py"]
+# `timeout` roda como PID 1 do contêiner: é um vigia que o código do usuário não consegue encerrar e que mata
+# tudo se o host (a API) morrer no meio da execução. O host passa os segundos e o comando (constantes, nunca
+# dados do usuário): `docker run ... IMAGEM <segundos> python -I /opt/trama/runner.py`.
+ENTRYPOINT ["timeout", "-s", "KILL"]

@@ -7,30 +7,10 @@ import dataclasses
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
-from app.main import criar_app
-from app.sandbox import DockerExecutor
 
-from .conftest import IMAGEM, LIMITES_TESTE
+from .conftest import LIMITES_TESTE, cliente
 from .helpers import aguardar, bloco, carregar_exemplo, con, constante, etapas, fluxo, saida
-
-
-def cliente(settings, executor):
-    return TestClient(criar_app(settings, executor))
-
-
-@pytest.fixture()
-def client(settings, executor):
-    with cliente(settings, executor) as c:
-        yield c
-
-
-@pytest.fixture()
-def client_sem_docker(settings):
-    ex = DockerExecutor(IMAGEM, LIMITES_TESTE, docker_bin="docker-que-nao-existe-xyz")
-    with cliente(settings, ex) as c:
-        yield c
 
 
 def fluxo_completo():

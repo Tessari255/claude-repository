@@ -10,6 +10,7 @@ Dois escopos de problema:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -59,10 +60,22 @@ def tipo_efetivo_param(pdef: ParamDef, tipo: BlockType, params: dict[str, Any]) 
     if pdef.type_from and pdef.type_from.param:
         ref = tipo.param(pdef.type_from.param)
         escolhido = valor_efetivo(ref, params) if ref else None
-        if escolhido in ROTULOS_TIPO:
+        if isinstance(escolhido, str) and escolhido in ROTULOS_TIPO:
             return escolhido
     return {"texto": "texto", "codigo": "texto", "numero": "numero", "booleano": "booleano",
             "lista": "lista", "json": "json", "selecao": "texto"}[pdef.type]
+
+
+MAX_TEXTO_PARAM = 100_000         # caracteres em parâmetros de texto (o código tem limite próprio)
+MAX_JSON_PARAM = 1024 * 1024      # bytes de uma lista/objeto JSON digitado em um parâmetro
+
+
+def _grande_demais(pdef: ParamDef, valor: Any, tipo_dado: str, rotulo: str) -> str | None:
+    if isinstance(valor, str) and pdef.type != "codigo" and len(valor) > MAX_TEXTO_PARAM:
+        return f"O texto de {rotulo} é grande demais (máximo de {MAX_TEXTO_PARAM:,} caracteres).".replace(",", ".")
+    if isinstance(valor, (list, dict)) and len(json.dumps(valor, ensure_ascii=False, default=str)) > MAX_JSON_PARAM:
+        return f"O conteúdo de {rotulo} é grande demais (máximo de {MAX_JSON_PARAM // 1024} KB)."
+    return None
 
 
 def mensagem_parametro(pdef: ParamDef, valor: Any, tipo_dado: str) -> str | None:
@@ -70,6 +83,9 @@ def mensagem_parametro(pdef: ParamDef, valor: Any, tipo_dado: str) -> str | None
     rotulo = f"“{pdef.label}”"
     if valor is None:
         return f"O campo {rotulo} é obrigatório." if pdef.required else None
+    grande = _grande_demais(pdef, valor, tipo_dado, rotulo)
+    if grande:
+        return grande
     if pdef.type_from and pdef.type_from.param:
         # o tipo do valor depende de outro parâmetro (ex.: constante)
         if tipo_dado == "texto":
@@ -307,7 +323,7 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None,
             if porta.type_from.param:
                 ref = t.param(porta.type_from.param)
                 escolhido = valor_efetivo(ref, blocos[block_id].params) if ref else None
-                if escolhido in ROTULOS_TIPO:
+                if isinstance(escolhido, str) and escolhido in ROTULOS_TIPO:
                     resultado = escolhido
             elif porta.type_from.input:
                 c = entrada_de.get((block_id, porta.type_from.input))
@@ -409,8 +425,17 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None,
     return a
 
 
+def _chave(i: Issue) -> tuple:
+    return (i.code, i.connection_id, tuple(i.connection_ids), i.block_id, i.port, i.message)
+
+
 def verificar_conexao(flow: Flow, nova: Connection, resolver: Resolver) -> list[Issue]:
-    """Problemas de estrutura que a nova conexão introduziria (lista vazia = pode conectar)."""
+    """Problemas de estrutura que a nova conexão introduziria (lista vazia = pode conectar).
+
+    Compara o fluxo antes e depois: uma conexão nova também pode invalidar OUTRAS conexões (ex.: mudar o tipo
+    que uma condição repassa), e isso precisa ser recusado no momento de conectar, não só ao salvar.
+    """
+    antes = {_chave(i) for i in analisar(flow, resolver).erros_de_estrutura}
     candidato = flow.model_copy(update={"connections": [*flow.connections, nova]})
-    analise = analisar(candidato, resolver)
-    return [i for i in analise.erros_de_estrutura if i.connection_id == nova.id or nova.id in i.connection_ids]
+    depois = analisar(candidato, resolver).erros_de_estrutura
+    return [i for i in depois if _chave(i) not in antes]

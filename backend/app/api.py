@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import custom_blocks, exchange
 from .config import Settings
@@ -17,7 +17,7 @@ from .models import BlockDraft, Connection, Flow
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store
-from .tipos import exemplo_do_tipo
+from .tipos import exemplo_do_tipo, validar_json_puro
 from .validation import analisar, verificar_conexao
 
 
@@ -62,9 +62,19 @@ class ExportarEntrada(Entrada):
     flow: Flow
 
 
+def _json_puro(v: Any) -> Any:
+    try:
+        validar_json_puro(v)
+    except ValueError as e:
+        raise ValueError(f"dados inválidos: {e}") from None
+    return v
+
+
 class ExecucaoEntrada(Entrada):
     flow: Flow | None = None  # se omitido, usa o fluxo salvo
     initial_data: dict[str, dict[str, Any]] | None = None
+
+    _conferir = field_validator("initial_data")(_json_puro)
 
 
 class CodigoEntrada(Entrada):
@@ -81,7 +91,9 @@ class TesteBlocoEntrada(Entrada):
     ref: RefBloco | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, Any] = Field(default_factory=dict)
-    project_id: str | None = None
+    project_id: str | None = Field(default=None, max_length=64)
+
+    _conferir = field_validator("params", "inputs")(_json_puro)
 
 
 def criar_router(s: Servicos) -> APIRouter:
@@ -105,7 +117,7 @@ def criar_router(s: Servicos) -> APIRouter:
         return [t.model_dump() for t in s.registro.listar(todas_versoes)]
 
     @r.get("/blocos/{type_id}/versoes/{version}")
-    def obter_bloco(type_id: str, version: int) -> dict[str, Any]:
+    def obter_bloco(type_id: str, version: int = Path(ge=1, le=1_000_000)) -> dict[str, Any]:
         t = s.registro.resolver(type_id, version)
         if t is None:
             raise ApiError(404, "bloco_nao_encontrado", "Esta versão do bloco não existe.")
@@ -137,10 +149,12 @@ def criar_router(s: Servicos) -> APIRouter:
             tipo = s.registro.resolver(corpo.ref.type, corpo.ref.version)  # type: ignore[union-attr]
             if tipo is None:
                 raise ApiError(404, "bloco_nao_encontrado", "Este bloco não existe.")
+        if corpo.project_id is not None and s.store.obter_projeto(corpo.project_id) is None:
+            raise ApiError(404, "projeto_nao_encontrado", "Projeto não encontrado.")
         return s.motor.testar_bloco(tipo, corpo.params, corpo.inputs, corpo.project_id)
 
     @r.get("/blocos/{type_id}/exemplo")
-    def exemplo(type_id: str, version: int | None = None) -> dict[str, Any]:
+    def exemplo(type_id: str, version: int | None = Query(default=None, ge=1, le=1_000_000)) -> dict[str, Any]:
         """Dados de exemplo para testar um bloco (um valor plausível por entrada/parâmetro)."""
         v = version or s.registro.ultima_versao(type_id)
         t = s.registro.resolver(type_id, v) if v else None

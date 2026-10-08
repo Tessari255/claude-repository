@@ -92,3 +92,14 @@ export function slugDeId(texto: string): string {
     .slice(0, 40)
   return /^[a-z_]/.test(base) ? base : base ? `_${base}` : ''
 }
+
+const ROTULO_ORIGEM: Record<string, string> = { stdout: 'saída', stderr: 'erro', system: 'sistema' }
+
+/** Rótulo de uma origem de log. Nunca confia no valor recebido (ex.: "__proto__" não pode quebrar a tela). */
+export function rotuloOrigem(origem: unknown): string {
+  return typeof origem === 'string' && Object.hasOwn(ROTULO_ORIGEM, origem) ? ROTULO_ORIGEM[origem] : 'saída'
+}
+
+export function classeOrigem(origem: unknown): string {
+  return typeof origem === 'string' && Object.hasOwn(ROTULO_ORIGEM, origem) ? origem : 'stdout'
+}

@@ -1,6 +1,7 @@
 import { Fragment, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { ROTULO_ESTADO, formatarData, formatarDuracao, formatarValor } from '../lib/visual'
 import type { Issue, Run, Step } from '../types'
+import { classeOrigem, rotuloOrigem } from '../lib/visual'
 import { Icon } from './Icons'
 import { Aviso, Detalhes, EstadoBadge } from './ui'
 
@@ -15,7 +16,6 @@ const ABAS: { id: Aba; rotulo: string; icone: string }[] = [
   { id: 'historico', rotulo: 'Histórico', icone: 'history' },
 ]
 
-const ROTULO_ORIGEM = { stdout: 'saída', stderr: 'erro', system: 'sistema' } as const
 
 function Vazio({ icone, children }: { icone: string; children: React.ReactNode }) {
   return <div className="vazio-grande"><Icon name={icone} size={28} /><p>{children}</p></div>
@@ -200,7 +200,7 @@ export function BottomPanel({
                                 <div><h4>Entradas</h4><pre className="valor">{s.inputs ? formatarValor(s.inputs) : '—'}</pre></div>
                                 <div><h4>Saídas</h4><pre className="valor">{s.outputs ? formatarValor(s.outputs) : '—'}</pre></div>
                               </div>
-                              {s.logs.length > 0 && <><h4>Logs</h4>{s.logs.map((l, k) => <pre key={k} className={`log log-${l.source}`}><span className="log-origem">{ROTULO_ORIGEM[l.source]}</span>{l.text}</pre>)}</>}
+                              {s.logs.length > 0 && <><h4>Logs</h4>{s.logs.map((l, k) => <pre key={k} className={`log log-${classeOrigem(l.source)}`}><span className="log-origem">{rotuloOrigem(l.source)}</span>{l.text}</pre>)}</>}
                             </td>
                           </tr>
                         )}
@@ -220,7 +220,7 @@ export function BottomPanel({
                     <section key={s.block_id}>
                       <h3>{nome(s.block_id)} <EstadoBadge estado={s.state} compacto /></h3>
                       {s.logs.map((l, i) => (
-                        <pre key={i} className={`log log-${l.source}`}><span className="log-origem">{ROTULO_ORIGEM[l.source]}</span>{l.text}</pre>
+                        <pre key={i} className={`log log-${classeOrigem(l.source)}`}><span className="log-origem">{rotuloOrigem(l.source)}</span>{l.text}</pre>
                       ))}
                     </section>
                   ))}

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
+import time
 
 import pytest
 
@@ -315,3 +317,109 @@ def test_limpar_segredos_mascara_credenciais():
     mascarado = limpar_segredos("Authorization: Bearer abcdefghijklmnopqrstuv")
     assert "abcdefghijklmnopqrstuv" not in mascarado
     assert limpar_segredos("texto normal") == "texto normal"
+
+
+# ---------- achados da revisão independente ----------------------------------------------------
+
+FORJAR = BYPASS + (
+    "def run(inputs, params):\n"
+    "    import collections, json\n"
+    "    token = collections._sys._getframe(1).f_locals['trabalho']['token']\n"
+    "    f = open(1, 'w', closefd=False)\n"
+    "    f.write('\\n\\x1e@@TRAMA@@' + token + json.dumps(%s) + '\\n'); f.flush()\n"
+    "    real('os')._exit(0)\n"
+)
+
+
+def test_resposta_forjada_pelo_codigo_do_usuario_e_saneada_pelo_host(executor):
+    """O código roda no mesmo processo do runner e consegue achar o token: o host não pode confiar em nada."""
+    forjado = (
+        '{"ok": False, "error": {"category": "excecao", "type": {"a": 1}, "message": "x" * 5000, "line": {"a": 1},'
+        ' "snippet": ["x"], "traceback": 5, "item_index": "1"},'
+        ' "logs": [{"source": "__proto__", "text": "invisivel"}, {"source": "stdout", "text": 5}, "lixo",'
+        ' {"source": "stderr", "text": "A" * 500000}]}'
+    )
+    r = rodar(executor, FORJAR % forjado)
+    assert not r.ok
+    e = r.error
+    assert e["category"] == "excecao" and e["type"] == "" and e["line"] is None and e["snippet"] is None
+    assert len(e["message"]) <= 2000 and e["traceback"] == "" and "item_index" not in e
+    assert [p["source"] for p in r.logs] == ["stderr"]                       # fonte inválida/entradas inválidas descartadas
+    assert sum(len(p["text"]) for p in r.logs) <= LIMITES_TESTE.logs_max      # e o total respeita o limite de logs
+    assert all(isinstance(p["text"], str) for p in r.logs)
+
+
+def test_resposta_forjada_com_formato_invalido_vira_erro_interno(executor):
+    r = rodar(executor, FORJAR % '{"ok": True, "payload": {"outputs": "nao-e-dict"}}')
+    assert not r.ok and r.error["category"] == "erro_interno"
+    r = rodar(executor, FORJAR % '{"ok": False, "error": {"category": "executor_indisponivel", "message": "fingindo"}}')
+    assert r.error["category"] == "excecao"  # categorias fora da lista conhecida não passam
+
+
+def test_texto_com_separadores_unicode_de_linha_nao_derruba_o_bloco(executor):
+    texto = "a\u2028b\u2029c\u0085d\x0be\x0cf\x1cg"
+    r = rodar(executor, "def run(inputs, params):\n    print(inputs['t'])\n    return {'t': inputs['t'], 'n': len(inputs['t'])}", {"t": texto})
+    assert r.ok, r.error
+    assert r.payload["outputs"] == {"t": texto, "n": len(texto)} and texto in r.logs[0]["text"]
+
+
+def test_verificacao_de_codigo_concorda_com_a_execucao(executor):
+    assert not executor.run("check", "return 1\ndef run(inputs, params):\n    return {}").ok       # compile() recusa
+    assert executor.run("check", "run = lambda inputs, params: {}").ok                                 # executável de verdade
+    r = executor.run("check", "def run(inputs, params):\n    return {}\nraise ValueError('no módulo')")
+    assert not r.ok and r.error["type"] == "ValueError" and r.error["line"] == 3
+    r = executor.run("check", "while True:\n    pass\ndef run(inputs, params):\n    return {}", limits=dataclasses.replace(LIMITES_TESTE, tempo_s=1))
+    assert not r.ok and r.error["category"] == "tempo_esgotado"
+
+
+def test_vigia_dentro_do_contêiner_encerra_codigo_orfao_se_o_host_morrer(executor):
+    """Mata o cliente `docker run` (simula a API morrendo) e confere que o contêiner se encerra sozinho."""
+    lim = dataclasses.replace(LIMITES_TESTE, tempo_s=1.0, folga_inicio_s=0.0)  # vigia = 1 + 0 + 5 = 6 s
+    nome = "trama-teste-vigia"
+    cmd = executor._comando(nome, lim)
+    job = {"token": "t", "mode": "block", "inputs": {}, "params": {}, "items": [], "limits": {
+        "time_s": 1, "memory_mb": 128, "logs_max": 1024, "result_max": 1024, "rlimit_as": True},
+        "code": BYPASS + "import time\ndef run(inputs, params):\n    s = real('signal')\n"
+                "    s.setitimer(s.ITIMER_REAL, 0)\n    while True:\n        time.sleep(1)\n"}
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        proc.stdin.write(json.dumps(job).encode()); proc.stdin.close()
+        for _ in range(40):  # espera o contêiner existir e estar rodando
+            r = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", nome], capture_output=True, text=True)
+            if r.stdout.strip() == "true":
+                break
+            time.sleep(0.25)
+        assert r.stdout.strip() == "true"
+        proc.kill()  # a "API" morreu: ninguém mais vai chamar docker kill
+        parou = False
+        for _ in range(60):
+            r = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", nome], capture_output=True, text=True)
+            if r.stdout.split()[0] == "false":
+                parou = True
+                break
+            time.sleep(0.5)
+        assert parou, "o contêiner continuou vivo depois que o host morreu"
+        assert r.stdout.split()[1] == "137"  # morto pelo vigia (SIGKILL)
+    finally:
+        subprocess.run(["docker", "rm", "-f", nome], capture_output=True)
+
+
+def test_encerramento_externo_que_nao_e_falta_de_memoria_nao_e_chamado_de_memoria(executor):
+    r = rodar(executor, BYPASS + "def run(inputs, params):\n    os = real('os')\n    os.kill(os.getpid(), 9)\n")
+    assert not r.ok and r.error["category"] == "encerrado_pelo_sistema"
+
+
+def test_estourar_o_tempo_de_cpu_sem_o_aviso_brando_e_tempo_esgotado_nao_memoria(executor):
+    codigo = BYPASS + ("def run(inputs, params):\n    s = real('signal')\n    s.setitimer(s.ITIMER_REAL, 0)\n"
+                       "    while True:\n        pass\n")
+    r = rodar(executor, codigo, tempo_s=1.0, folga_inicio_s=30.0)  # o host espera; quem corta é o limite de CPU
+    assert not r.ok and r.error["category"] == "tempo_esgotado" and "processamento" in r.error["message"]
+
+
+def test_comando_do_docker_tem_todas_as_restricoes(executor):
+    cmd = " ".join(executor._comando("x", LIMITES_TESTE))
+    for flag in ("--network none", "--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 65534:65534",
+                 "--pull never", "--log-driver none", "--ulimit core=0", "--ipc none", "--pids-limit"):
+        assert flag in cmd, flag
+    assert "-v " not in cmd and "--volume" not in cmd and "--env" not in cmd and "-e " not in cmd  # nada do host entra
+    assert "--rm" not in cmd  # removido explicitamente, depois de ler o motivo do encerramento

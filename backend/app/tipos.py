@@ -65,7 +65,13 @@ def validar_json_puro(valor: Any, profundidade: int = 0) -> None:
     """Garante que o valor só contém JSON puro (sem NaN/infinito, chaves não-texto etc.)."""
     if profundidade > PROFUNDIDADE_MAX:
         raise ValueError("estrutura aninhada demais")
-    if valor is None or isinstance(valor, (bool, str)):
+    if valor is None or isinstance(valor, bool):
+        return
+    if isinstance(valor, str):
+        try:
+            valor.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("texto com caracteres inválidos (surrogate solitário)") from None
         return
     if isinstance(valor, int):
         return
@@ -81,6 +87,7 @@ def validar_json_puro(valor: Any, profundidade: int = 0) -> None:
         for chave, item in valor.items():
             if not isinstance(chave, str):
                 raise ValueError(f"chave {chave!r} não é texto")
+            validar_json_puro(chave, profundidade + 1)
             validar_json_puro(item, profundidade + 1)
         return
     raise ValueError(f"valor do tipo {type(valor).__name__} não é JSON")

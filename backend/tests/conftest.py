@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Limites, Settings  # noqa: E402
 from app.sandbox import DockerExecutor  # noqa: E402
 
-IMAGEM = os.environ.get("TRAMA_EXECUTOR_IMAGE", "trama-executor:1")
+IMAGEM = os.environ.get("TRAMA_EXECUTOR_IMAGE", "trama-executor:2")
 LIMITES_TESTE = Limites(tempo_s=4.0, memoria_mb=128, folga_inicio_s=5.0)
 
 
@@ -76,3 +76,26 @@ def sem_docker(settings):
 @pytest.fixture()
 def com_docker(settings, executor):
     return _montar(settings, executor)
+
+
+# ---------------------------------------------------------------------------- clientes HTTP
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.main import criar_app  # noqa: E402
+
+
+def cliente(settings, executor) -> TestClient:
+    return TestClient(criar_app(settings, executor))
+
+
+@pytest.fixture()
+def client(settings, executor):
+    with cliente(settings, executor) as c:
+        yield c
+
+
+@pytest.fixture()
+def client_sem_docker(settings):
+    ex = DockerExecutor(IMAGEM, LIMITES_TESTE, docker_bin="docker-que-nao-existe-xyz")
+    with cliente(settings, ex) as c:
+        yield c

@@ -86,6 +86,20 @@ class SandboxResult:
     duration_ms: int = 0
 
 
+CATEGORIAS_DE_ERRO = frozenset({
+    "excecao", "sintaxe", "tempo_esgotado", "memoria_excedida", "saida_excessiva",
+    "retorno_invalido", "funcao_ausente", "erro_interno",
+})
+
+
+def _eh_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10**9
+
+
+def _texto(v: Any, limite: int) -> str:
+    return v[:limite] if isinstance(v, str) else ""
+
+
 def _erro(categoria: str, mensagem: str, **extra: Any) -> dict[str, Any]:
     base = {"category": categoria, "type": categoria, "message": mensagem,
             "line": None, "snippet": None, "traceback": ""}
@@ -105,13 +119,15 @@ class DockerExecutor:
 
     # ------------------------------------------------------------------ status
     def status(self, forcar: bool = False) -> ExecutorStatus:
+        agora = time.monotonic()
         with self._lock:
-            agora = time.monotonic()
             if not forcar and self._cache and agora - self._cache[0] < 10:
                 return self._cache[1]
-            resultado = self._checar()
-            self._cache = (agora, resultado)
-            return resultado
+        # A checagem chama o docker (pode demorar): não segura o lock, para não travar outras requisições.
+        resultado = self._checar()
+        with self._lock:
+            self._cache = (time.monotonic(), resultado)
+        return resultado
 
     def _checar(self) -> ExecutorStatus:
         base = ExecutorStatus(False, self.imagem)
@@ -170,9 +186,15 @@ class DockerExecutor:
     # --------------------------------------------------------------- execução
     def _comando(self, nome: str, limites: Limites) -> list[str]:
         mem = limites.memoria_mb + 64  # folga para o interpretador; o limite fino é o RLIMIT_AS do runner
+        cpu_brando = int(limites.tempo_s) + 3
+        # Vigia dentro do contêiner (`timeout` é o PID 1): só dispara se o host morrer, por isso fica
+        # depois do abate normal feito pelo host.
+        vigia = int(limites.tempo_s + limites.folga_inicio_s) + 5
         return [
-            self.docker_bin, "run", "--rm", "-i",
+            self.docker_bin, "run", "-i",
             "--name", nome, "--label", ROTULO,
+            "--pull", "never",           # nunca baixar imagem no meio de uma execução
+            "--log-driver", "none",      # a saída já vem pelo pipe; não duplica em disco no host
             "--network", "none",
             "--read-only",
             "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m",
@@ -180,14 +202,17 @@ class DockerExecutor:
             "--memory", f"{mem}m", "--memory-swap", f"{mem}m",
             "--cpus", str(limites.cpus),
             "--pids-limit", str(limites.max_processos),
-            "--ulimit", f"cpu={int(limites.tempo_s) + 3}",
+            # soft < hard: estourar o tempo de CPU recebe SIGXCPU (exit 152) antes do SIGKILL
+            "--ulimit", f"cpu={cpu_brando}:{cpu_brando + 1}",
             "--ulimit", "nofile=256:256",
             "--ulimit", "fsize=16777216",
+            "--ulimit", "core=0",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--user", "65534:65534",
             "--ipc", "none",
             self.imagem,
+            str(vigia), "python", "-I", "/opt/trama/runner.py",
         ]
 
     def run(self, mode: str, code: str, inputs: dict | None = None,
@@ -212,7 +237,7 @@ class DockerExecutor:
                 "rlimit_as": limites.rlimit_as,
             },
         }
-        corpo = json.dumps(trabalho, ensure_ascii=False).encode("utf-8")
+        corpo = json.dumps(trabalho, ensure_ascii=True).encode("ascii")  # ASCII puro: sem surrogates nem separadores Unicode
         tamanho_max = limites.valor_max * 4
         if len(corpo) > tamanho_max:
             return SandboxResult(False, error=_erro(
@@ -220,11 +245,30 @@ class DockerExecutor:
                 f"Os dados enviados ao código são grandes demais (limite de {tamanho_max // 1024} KB)."))
 
         with self._semaforo:
-            return self._rodar(corpo, token, limites)
+            nome = f"trama-{uuid.uuid4().hex[:12]}"
+            try:
+                return self._rodar(corpo, token, limites, nome)
+            finally:
+                self._remover(nome)  # sem --rm: o contêiner precisa existir até lermos o motivo do encerramento
 
-    def _rodar(self, corpo: bytes, token: str, limites: Limites) -> SandboxResult:
-        nome = f"trama-{uuid.uuid4().hex[:12]}"
-        cap_stdout = limites.valor_max + 2 * limites.logs_max + 65536
+    def _remover(self, nome: str) -> None:
+        try:
+            subprocess.run([self.docker_bin, "rm", "-f", nome], capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            log.warning("Não foi possível remover o contêiner %s (a limpeza da próxima inicialização cuida dele).", nome)
+
+    def _oom(self, nome: str) -> bool:
+        try:
+            r = subprocess.run([self.docker_bin, "inspect", "-f", "{{.State.OOMKilled}}", nome],
+                               capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() == "true"
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    def _rodar(self, corpo: bytes, token: str, limites: Limites, nome: str) -> SandboxResult:
+        # O resultado pode crescer até ~6x ao ser escapado em JSON (controles viram \u00XX); o teto cobre isso
+        # para não abater por engano uma resposta legítima.
+        cap_stdout = 6 * (limites.valor_max + limites.logs_max) + 65536
         cap_stderr = 65536
         saida, erro_bytes = bytearray(), bytearray()
         estourou = threading.Event()
@@ -306,20 +350,32 @@ class DockerExecutor:
         pos = texto.rfind(marcador)
         if pos >= 0:
             try:
-                resposta = json.loads(texto[pos + len(marcador):].strip().splitlines()[0])
-            except (ValueError, IndexError):
+                # split("\n") e não splitlines(): U+2028/U+2029/U+0085 em textos legítimos também "quebram linha"
+                resposta = json.loads(texto[pos + len(marcador):].split("\n", 1)[0])
+            except ValueError:
                 resposta = None
             if isinstance(resposta, dict):
-                return self._converter(resposta, duracao)
+                return self._converter(resposta, duracao, limites)
 
         stderr_texto = limpar_segredos(erro_bytes.decode("utf-8", "replace")).strip()
         codigo = proc.returncode
         log.warning("Executor terminou sem resultado (código %s): %s", codigo, stderr_texto[-500:])
-        if codigo == 137:
+        if codigo == 137 and self._oom(nome):
             return SandboxResult(False, duration_ms=duracao, error=_erro(
                 "memoria_excedida",
                 f"O código foi encerrado por usar mais memória que o limite ({limites.memoria_mb} MB).",
                 suggestion="Processe menos dados de uma vez ou evite criar estruturas muito grandes."))
+        if codigo == 152:  # SIGXCPU: estourou o tempo de CPU
+            return SandboxResult(False, duration_ms=duracao, error=_erro(
+                "tempo_esgotado",
+                f"O código usou mais tempo de processamento que o limite ({limites.tempo_s:g} s) e foi encerrado.",
+                suggestion="Verifique se há um laço infinito (while True) ou reduza a quantidade de dados."))
+        if codigo in (137, 143):
+            return SandboxResult(False, duration_ms=duracao, error=_erro(
+                "encerrado_pelo_sistema",
+                "O código foi encerrado pelo sistema antes de terminar.",
+                suggestion="Isso costuma indicar uso excessivo de recursos. Simplifique o código ou reduza os dados.",
+                traceback=stderr_texto[-500:]))
         if codigo in (125, 126, 127):
             return SandboxResult(False, duration_ms=duracao, error=_erro(
                 "executor_indisponivel",
@@ -330,17 +386,47 @@ class DockerExecutor:
             "O executor terminou de forma inesperada, sem devolver resultado.",
             traceback=stderr_texto[-1500:]))
 
-    def _converter(self, r: dict, duracao: int) -> SandboxResult:
-        logs = [
-            {"source": p.get("source", "stdout"), "text": limpar_segredos(str(p.get("text", "")))}
-            for p in r.get("logs", []) if isinstance(p, dict)
-        ]
-        if r.get("ok"):
-            return SandboxResult(True, payload=r.get("payload") or {}, logs=logs,
-                                 duration_ms=int(r.get("duration_ms", duracao)))
-        erro = r.get("error") or _erro("erro_interno", "Erro desconhecido no executor.")
-        erro["message"] = limpar_segredos(str(erro.get("message", "")))
-        erro["traceback"] = limpar_segredos(str(erro.get("traceback", "")))
+    def _converter(self, r: dict, duracao: int, limites: Limites) -> SandboxResult:
+        """Converte a resposta do runner. O código do usuário roda no mesmo processo do runner, então ele
+        PODE forjar essa resposta: nada aqui é confiável. Só tipos e tamanhos conhecidos passam adiante."""
+        logs: list[dict[str, str]] = []
+        restante = limites.logs_max
+        for p in r.get("logs", []) if isinstance(r.get("logs"), list) else []:
+            if not isinstance(p, dict) or p.get("source") not in ("stdout", "stderr") or not isinstance(p.get("text"), str):
+                continue
+            texto = p["text"].encode("utf-8", "replace")[:restante].decode("utf-8", "ignore")
+            restante -= len(texto.encode("utf-8"))
+            if texto:
+                logs.append({"source": p["source"], "text": limpar_segredos(texto)})
+            if restante <= 0:
+                break
+        if r.get("ok") is True:
+            payload = r.get("payload")
+            saidas, itens = (payload.get("outputs"), payload.get("items")) if isinstance(payload, dict) else (None, None)
+            if isinstance(payload, dict) and not payload:
+                payload = {}  # modo "check": só confirma que o código carrega
+            elif isinstance(saidas, dict):
+                payload = {"outputs": saidas}
+            elif isinstance(itens, list):
+                payload = {"items": itens}
+            else:
+                return SandboxResult(False, logs=logs, duration_ms=duracao, error=_erro(
+                    "erro_interno", "O executor devolveu um resultado em formato inesperado."))
+            duracao_runner = r.get("duration_ms")
+            return SandboxResult(True, payload=payload, logs=logs,
+                                 duration_ms=duracao_runner if _eh_int(duracao_runner) else duracao)
+        bruto = r.get("error") if isinstance(r.get("error"), dict) else {}
+        categoria = bruto.get("category")
+        erro = {
+            "category": categoria if categoria in CATEGORIAS_DE_ERRO else "excecao",
+            "type": _texto(bruto.get("type"), 200),
+            "message": limpar_segredos(_texto(bruto.get("message"), 2000)) or "Erro desconhecido no executor.",
+            "line": bruto.get("line") if _eh_int(bruto.get("line")) else None,
+            "snippet": _texto(bruto.get("snippet"), 500) or None,
+            "traceback": limpar_segredos(_texto(bruto.get("traceback"), 6000)),
+        }
+        if _eh_int(bruto.get("item_index")):
+            erro["item_index"] = bruto["item_index"]
         return SandboxResult(False, error=erro, logs=logs, duration_ms=duracao)
 
     def _abater(self, nome: str, proc: subprocess.Popen) -> None:

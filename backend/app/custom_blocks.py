@@ -68,7 +68,7 @@ def _checar_declaracao(draft: BlockDraft) -> None:
                        "Blocos personalizados não podem usar saídas condicionais nem tipos dinâmicos.")
 
 
-def _salvar(store: Store, executor: DockerExecutor, tipo: BlockType) -> dict[str, Any]:
+def _salvar(store: Store, executor: DockerExecutor, tipo: BlockType, nova_versao: bool = False) -> dict[str, Any]:
     avisos: list[str] = []
     check = verificar_codigo(executor, tipo.code or "")
     if check["verified"] and not check["ok"]:
@@ -79,7 +79,7 @@ def _salvar(store: Store, executor: DockerExecutor, tipo: BlockType) -> dict[str
     if not check["verified"]:
         avisos.append("O código não pôde ser verificado porque o executor isolado está indisponível. "
                       "O bloco foi salvo, mas só poderá ser testado e executado quando o executor estiver disponível.")
-    salvo = store.inserir_tipo(tipo)
+    salvo = store.inserir_nova_versao(tipo) if nova_versao else store.inserir_tipo(tipo)
     return {"block": salvo.model_dump(), "warnings": avisos}
 
 
@@ -94,11 +94,10 @@ def nova_versao(store: Store, registro: Registro, executor: DockerExecutor, type
     """Salva uma NOVA versão. Fluxos existentes continuam na versão que fixaram."""
     if not type_id.startswith("custom."):
         raise ApiError(403, "bloco_interno", "Blocos internos não podem ser alterados.")
-    ultima = registro.ultima_versao(type_id)
-    if ultima is None:
+    if registro.ultima_versao(type_id) is None:
         raise ApiError(404, "bloco_nao_encontrado", "Bloco não encontrado.")
     _checar_declaracao(draft)
-    return _salvar(store, executor, draft.para_tipo(type_id, ultima + 1))
+    return _salvar(store, executor, draft.para_tipo(type_id, 1), nova_versao=True)  # a versão real é atribuída na gravação
 
 
 def excluir_bloco(store: Store, type_id: str) -> None:

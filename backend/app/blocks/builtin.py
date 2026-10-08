@@ -102,6 +102,18 @@ def buscar_caminho(objeto: Any, caminho: str) -> Any:
     return atual
 
 
+MAX_CAMINHOS = 50
+
+
+def _exigir_tamanho(estimado: int, ctx: "ContextoBloco", o_que: str) -> None:
+    """Blocos internos rodam no processo da API: o tamanho do resultado é conferido ANTES de montá-lo."""
+    if estimado > ctx.limites.valor_max:
+        raise ErroBloco(
+            f"{o_que} ficaria grande demais (mais de {ctx.limites.valor_max // 1024} KB).",
+            codigo="valor_grande_demais",
+            sugestao="Use um texto/lista menor ou um trecho de substituição mais curto.")
+
+
 # ------------------------------------------------------------------------------ handlers
 def _inicio(inputs, params, ctx):
     dados = ctx.dados_iniciais if ctx.dados_iniciais is not None else params.get("dados", {})
@@ -174,7 +186,9 @@ def _texto(inputs, params, ctx):
     elif op == "inverter":
         r = t[::-1]
     elif op == "substituir":
-        r = t.replace(params["buscar"], params.get("substituir_por", ""))
+        buscar, novo = params["buscar"], params.get("substituir_por", "")
+        _exigir_tamanho(len(t) + t.count(buscar) * max(len(novo) - len(buscar), 0), ctx, "O texto resultante")
+        r = t.replace(buscar, novo)
     elif op == "prefixo_sufixo":
         r = f"{params.get('prefixo', '')}{t}{params.get('sufixo', '')}"
     elif op == "concatenar":
@@ -192,11 +206,18 @@ def _selecionar_campos(inputs, params, ctx):
     caminhos = [c.strip() for c in str(params["caminhos"]).replace(",", "\n").splitlines() if c.strip()]
     if not caminhos:
         raise ErroBloco("Informe ao menos um campo para selecionar.", codigo="parametro_invalido")
+    if len(caminhos) > MAX_CAMINHOS:
+        raise ErroBloco(f"São campos demais ({len(caminhos)}): o máximo é {MAX_CAMINHOS} por bloco.",
+                        codigo="parametro_invalido")
     nulo = params.get("se_ausente", "erro") == "nulo"
     selecionados: dict[str, Any] = {}
+    estimado = 0
     for caminho in caminhos:
         try:
             selecionados[caminho] = buscar_caminho(objeto, caminho)
+            if isinstance(selecionados[caminho], (dict, list)):  # o mesmo trecho grande pode ser pedido várias vezes
+                estimado += len(json.dumps(selecionados[caminho], ensure_ascii=False))
+                _exigir_tamanho(estimado, ctx, "O conjunto de campos selecionados")
         except (KeyError, IndexError, ValueError, TypeError):
             if nulo:
                 selecionados[caminho] = None
@@ -348,6 +369,10 @@ def _para_cada(inputs, params, ctx):
                             codigo="executor_indisponivel")
         resultado = ctx.mapa_python(str(params["codigo"]), lista, params)
     else:
+        if op == "adicionar_texto":  # único que aumenta cada item: confere o total antes de montar
+            extra = len(str(params.get("prefixo", ""))) + len(str(params.get("sufixo", "")))
+            _exigir_tamanho(sum(len(_texto_de(i)) + extra for i in lista if not isinstance(i, (list, dict))),
+                            ctx, "A nova lista")
         resultado = [_aplicar_item(op, item, i, params) for i, item in enumerate(lista)]
     return {"resultado": resultado, "quantidade": len(resultado)}
 

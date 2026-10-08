@@ -109,13 +109,20 @@ entrega o trabalho por `stdin`. Cada execução é um contêiner novo com:
 | Sem rede | `--network none` (o teste confirma que só existe a interface `lo`) |
 | Sistema de arquivos restrito | `--read-only` + um único tmpfs de 16 MB em `/tmp` (sem `exec`); sem volumes, sem credenciais, sem o socket do Docker |
 | Memória / CPU / processos | `--memory` (sem swap) + `RLIMIT_AS`, `--cpus`, `--pids-limit`, `ulimit` de CPU/arquivos |
-| Tempo | limite brando dentro do runner (mostra a **linha** onde parou e preserva os logs) + abate forçado pelo host com `docker kill` |
+| Tempo | limite brando dentro do runner (mostra a **linha** onde parou e preserva os logs; re-armado a cada 250 ms) + abate forçado pelo host com `docker kill` + **vigia dentro do contêiner** (`timeout` como PID 1, que o código não consegue encerrar e que mata tudo se a API morrer) + limite de tempo de CPU |
 | Volume de saída e de dados | teto de logs, de resultado e de entrada; excesso → encerra com erro claro |
-| Erros | traduzidos para português; segredos conhecidos mascarados nos logs |
+| Resposta do runner | tratada como **não confiável**: o código do usuário roda no mesmo processo do runner e consegue forjá-la, então o host só aceita tipos, categorias e tamanhos conhecidos (logs truncados no limite, linha/trecho como número/texto) |
+| Erros | traduzidos para português; segredos conhecidos mascarados nos logs; `OOMKilled` distingue falta de memória de outros encerramentos |
+| Disco do host | `--log-driver none` (a saída não é duplicada no log do daemon) e `--pull never` |
 
 A lista de bibliotecas permitidas dentro do runner é **só conveniência** (mensagem amigável); os testes contornam esse filtro de
 propósito para provar que o que protege é o contêiner. O processo da API precisa de acesso ao Docker — isso equivale a privilégio
 elevado no computador. Veja as limitações abaixo.
+
+Os **blocos internos** rodam no processo da API (código nosso), então também têm teto: o tamanho do resultado é conferido *antes* de montá-lo
+(substituir texto, adicionar texto a listas, selecionar campos), parâmetros de texto até 100.000 caracteres, JSON digitado até 1 MB, no máximo
+50 campos por bloco de seleção. O serviço local ainda recusa `Host` desconhecido, origem diferente, corpo sem `Content-Length`/`Content-Type` JSON, e envia
+`X-Frame-Options`, `nosniff` e uma Content-Security-Policy restritiva.
 
 ---
 
@@ -154,7 +161,7 @@ e por bloco: entradas, saídas, logs e erro.
 | Variável | Padrão | |
 |---|---|---|
 | `TRAMA_DATA_DIR` | `./data` | onde fica o banco SQLite |
-| `TRAMA_EXECUTOR_IMAGE` | `trama-executor:1` | imagem do executor |
+| `TRAMA_EXECUTOR_IMAGE` | `trama-executor:2` | imagem do executor |
 | `TRAMA_TIMEOUT_S` / `TRAMA_MEMORY_MB` / `TRAMA_CPUS` / `TRAMA_PIDS` | `10` / `256` / `1` / `64` | limites do código Python |
 | `TRAMA_LOGS_KB` / `TRAMA_VALUE_KB` / `TRAMA_MAX_LIST_ITEMS` | `64` / `1024` / `10000` | volume de logs, tamanho de cada valor, itens por lista |
 | `TRAMA_HOST` / `TRAMA_PORT` | `127.0.0.1` / `8000` | só local por padrão (não há autenticação) |
@@ -167,9 +174,9 @@ e por bloco: entradas, saídas, logs e erro.
 ## Testes
 
 ```bash
-make test-backend    # 147 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
+make test-backend    # 172 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
 make test-frontend   # typecheck + testes unitários (vitest)
-make e2e             # 13 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
+make e2e             # 16 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
                      # 1ª vez: `cd frontend && npx playwright install chromium` (ou PLAYWRIGHT_CHROMIUM_PATH=/caminho/do/chrome)
 ```
 
@@ -196,6 +203,17 @@ a marcação como *ignorados* dos blocos do caminho não escolhido etc. faz algu
 
 ---
 
+## Revisão independente de segurança
+
+Um revisor independente (sem acesso às minhas conclusões) tentou provar falhas no executor, no motor, na importação e no frontend. Ele **não achou**
+nenhum caminho que execute código do usuário fora do contêiner, nem com o Docker ausente. Achou e provou falhas em outras partes, todas corrigidas e cobertas por
+teste de regressão (`backend/tests/test_revisao.py`, `test_executor.py`, `frontend/e2e/revisao.spec.ts`): blocos internos que amplificavam dados antes do teto de tamanho,
+runner com resposta forjável pelo código do usuário, contêiner órfão se a API morresse, texto com U+2028 derrubando o bloco, parâmetros muito aninhados que gravavam e
+depois não abriam, conexões que invalidavam outras, erros 500 em entradas inesperadas, edição simultânea de blocos, importação que poluía a biblioteca, perda silenciosa de dados
+ao fechar o editor de bloco ou ao reeditar um bloco importado, e uma tela que ficava em branco com dados malformados.
+
+---
+
 ## Limitações verificadas
 
 **Segurança e operação**
@@ -210,6 +228,9 @@ a marcação como *ignorados* dos blocos do caminho não escolhido etc. faz algu
 * Execuções não podem ser **canceladas** pelo usuário (terminam, falham ou estouram o limite); se o servidor reiniciar no meio, ficam
   marcadas como falha. Rode **um único processo** do servidor.
 * O histórico de execuções **não tem política de retenção** (cresce até o projeto ser excluído).
+* Dentro do contêiner ainda são legíveis metadados do host sem segredos (`/proc/version`, `/proc/meminfo`, `mountinfo`, `/etc/resolv.conf`); como não há rede, não há o que fazer com eles.
+* Se a API morrer no meio de uma execução, o vigia encerra o contêiner em até ≈ (limite de tempo + folga + 5) s; contêineres que sobrarem são removidos na próxima inicialização.
+* **Inteiros acima de 2^53** (≈ 9×10^15) perdem precisão quando passam pelo navegador (limite do JSON do JavaScript). O backend e o Python os preservam; use texto para identificadores longos.
 
 **Produto**
 * Apenas grafos sem ciclos; condições **não reúnem caminhos**; repetição só dentro de *Para cada item* (limite padrão 100, máximo 10.000).

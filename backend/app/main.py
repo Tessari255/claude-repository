@@ -13,7 +13,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .api import Servicos, criar_router, resposta_de_erro, tratar_validacao
 from .config import Settings, carregar_settings
@@ -30,29 +29,59 @@ METODOS_COM_EFEITO = {"POST", "PUT", "PATCH", "DELETE"}
 TAMANHO_MAX_CORPO = 6 * 1024 * 1024
 
 
-class ProtecaoLocal(BaseHTTPMiddleware):
-    """A Trama é local e de usuário único. Mesmo assim, uma página qualquer aberta no navegador
-    não pode disparar ações na API: exigimos JSON (força preflight de CORS, que não liberamos)
-    e recusamos requisições de outra origem."""
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+       "frame-ancestors 'none'")
 
-    def __init__(self, app: Any, origens_permitidas: set[str]) -> None:
+
+def _hostname(valor: str) -> str:
+    """'localhost:8000' → 'localhost'; '[::1]:8000' → '::1'."""
+    try:
+        return (urlparse("//" + valor).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+class ProtecaoLocal(BaseHTTPMiddleware):
+    """A Trama é local e de usuário único. Mesmo assim, uma página qualquer aberta no navegador não pode
+    disparar ações na API nem ler respostas por DNS rebinding: só aceitamos Host local conhecido, exigimos JSON
+    (força preflight de CORS, que não liberamos) e recusamos requisições de outra origem."""
+
+    def __init__(self, app: Any, hosts_permitidos: set[str], origens_permitidas: set[str]) -> None:
         super().__init__(app)
+        self.hosts = {h.strip("[]").lower() for h in hosts_permitidos}
         self.origens = origens_permitidas
 
+    @staticmethod
+    def _recusa(status: int, codigo: str, mensagem: str) -> JSONResponse:
+        return JSONResponse(status_code=status, content=ApiError(status, codigo, mensagem).corpo())
+
     async def dispatch(self, request: Request, call_next: Any) -> Any:
+        host = request.headers.get("host", "")
+        if _hostname(host) not in self.hosts:
+            return self._recusa(400, "host_nao_permitido", "Endereço de acesso não permitido.")
         if request.method in METODOS_COM_EFEITO:
             origem = request.headers.get("origin")
-            if origem and urlparse(origem).netloc != request.headers.get("host") and origem not in self.origens:
-                return JSONResponse(status_code=403, content=ApiError(
-                    403, "origem_nao_permitida", "Requisição de outra origem recusada.").corpo())
-            tamanho = int(request.headers.get("content-length") or 0)
+            if origem and urlparse(origem).netloc != host and origem not in self.origens:
+                return self._recusa(403, "origem_nao_permitida", "Requisição de outra origem recusada.")
+            tamanho_txt = request.headers.get("content-length")
+            if tamanho_txt is None and "transfer-encoding" in request.headers:
+                return self._recusa(411, "tamanho_obrigatorio", "Informe o tamanho do conteúdo (Content-Length).")
+            try:
+                tamanho = int(tamanho_txt or 0)
+            except ValueError:
+                return self._recusa(400, "requisicao_invalida", "Content-Length inválido.")
             if tamanho > TAMANHO_MAX_CORPO:
-                return JSONResponse(status_code=413, content=ApiError(
-                    413, "corpo_grande_demais", "O conteúdo enviado é grande demais.").corpo())
+                return self._recusa(413, "corpo_grande_demais", "O conteúdo enviado é grande demais.")
             if tamanho > 0 and not request.headers.get("content-type", "").startswith("application/json"):
-                return JSONResponse(status_code=415, content=ApiError(
-                    415, "tipo_de_conteudo", "Envie o conteúdo como application/json.").corpo())
-        return await call_next(request)
+                return self._recusa(415, "tipo_de_conteudo", "Envie o conteúdo como application/json.")
+        resposta = await call_next(request)
+        resposta.headers.setdefault("X-Frame-Options", "DENY")
+        resposta.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resposta.headers.setdefault("Referrer-Policy", "no-referrer")
+        if not request.url.path.startswith("/api/"):
+            resposta.headers.setdefault("Content-Security-Policy", CSP)
+        return resposta
 
 
 def criar_app(settings: Settings | None = None, executor: DockerExecutor | None = None) -> FastAPI:
@@ -84,8 +113,8 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
     app = FastAPI(title="Trama", version="0.1.0", lifespan=ciclo_de_vida, redoc_url=None,
                   docs_url="/api/docs" if docs else None, openapi_url="/api/openapi.json" if docs else None)
     app.state.servicos = servicos
-    app.add_middleware(ProtecaoLocal, origens_permitidas=set(settings.origens_permitidas))
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.hosts_permitidos))
+    app.add_middleware(ProtecaoLocal, hosts_permitidos=set(settings.hosts_permitidos),
+                       origens_permitidas=set(settings.origens_permitidas))
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
@@ -94,6 +123,11 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
     @app.exception_handler(RequestValidationError)
     async def _validacao(request: Request, exc: RequestValidationError) -> JSONResponse:
         return tratar_validacao(request, exc)
+
+    @app.exception_handler(UnicodeEncodeError)
+    async def _texto_invalido(_: Request, exc: UnicodeEncodeError) -> JSONResponse:
+        return JSONResponse(status_code=422, content=ApiError(
+            422, "texto_invalido", "O conteúdo enviado tem caracteres que não podem ser gravados.").corpo())
 
     @app.exception_handler(Exception)
     async def _inesperado(_: Request, exc: Exception) -> JSONResponse:
@@ -111,9 +145,12 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
         def frontend(caminho: str) -> FileResponse:
             if caminho.startswith("api/"):
                 raise ApiError(404, "nao_encontrado", "Recurso não encontrado.")
-            arquivo = (pasta / caminho).resolve()
-            if caminho and arquivo.is_file() and pasta.resolve() in arquivo.parents:
-                return FileResponse(arquivo)
+            try:
+                arquivo = (pasta / caminho).resolve()
+                if caminho and arquivo.is_file() and pasta.resolve() in arquivo.parents:
+                    return FileResponse(arquivo)
+            except (OSError, ValueError):  # ex.: byte NUL ou nome inválido no caminho
+                pass
             return FileResponse(pasta / "index.html")
 
     return app

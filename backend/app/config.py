@@ -43,7 +43,7 @@ class Limites:
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = field(default_factory=lambda: RAIZ / "data")
-    imagem_executor: str = "trama-executor:1"
+    imagem_executor: str = "trama-executor:2"
     docker_bin: str = "docker"
     limites: Limites = field(default_factory=Limites)
     hosts_permitidos: tuple[str, ...] = ("localhost", "127.0.0.1", "[::1]", "testserver")
@@ -70,7 +70,7 @@ def carregar_settings() -> Settings:
     hosts = os.environ.get("TRAMA_ALLOWED_HOSTS")
     return Settings(
         data_dir=Path(os.environ.get("TRAMA_DATA_DIR", RAIZ / "data")),
-        imagem_executor=os.environ.get("TRAMA_EXECUTOR_IMAGE", "trama-executor:1"),
+        imagem_executor=os.environ.get("TRAMA_EXECUTOR_IMAGE", "trama-executor:2"),
         docker_bin=os.environ.get("TRAMA_DOCKER_BIN", "docker"),
         limites=limites,
         hosts_permitidos=tuple(h.strip() for h in hosts.split(",")) if hosts else Settings().hosts_permitidos,

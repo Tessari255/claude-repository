@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .tipos import TIPOS_DADO
+from .tipos import TIPOS_DADO, validar_json_puro
 
 TipoParametro = Literal["texto", "numero", "booleano", "lista", "json", "selecao", "codigo"]
 Estado = Literal["aguardando", "executando", "concluido", "falhou", "ignorado"]
@@ -23,6 +23,7 @@ RE_ID_TIPO = re.compile(r"^(builtin|custom)\.[a-z0-9_\-]{1,48}$")
 MAX_BLOCOS = 200
 MAX_CONEXOES = 600
 MAX_CODIGO = 64 * 1024
+MAX_VERSAO = 1_000_000
 
 
 class Estrito(BaseModel):
@@ -113,7 +114,7 @@ def _conferir_ids_unicos(entradas: list, saidas: list, params: list) -> None:
 
 class BlockType(Estrito):
     id: str
-    version: int = Field(ge=1)
+    version: int = Field(ge=1, le=MAX_VERSAO)
     name: str = Field(min_length=1, max_length=60)
     description: str = Field(default="", max_length=500)
     category: str = Field(default="Personalizados", min_length=1, max_length=40)
@@ -187,8 +188,8 @@ class Viewport(Estrito):
 
 class BlockInstance(Estrito):
     id: str
-    type: str
-    version: int = Field(ge=1)
+    type: str = Field(max_length=80)
+    version: int = Field(ge=1, le=MAX_VERSAO)
     position: Position
     params: dict[str, Any] = Field(default_factory=dict)
     label: str | None = Field(default=None, max_length=80)
@@ -198,6 +199,16 @@ class BlockInstance(Estrito):
     def _id(cls, v: str) -> str:
         if not RE_ID_BLOCO.match(v):
             raise ValueError("identificador inválido (use letras, números, _ e -)")
+        return v
+
+    @field_validator("params")
+    @classmethod
+    def _params(cls, v: dict[str, Any]) -> dict[str, Any]:
+        # profundidade limitada, sem NaN/infinito e sem surrogates: evita dados que gravam mas não leem de volta
+        try:
+            validar_json_puro(v)
+        except ValueError as e:
+            raise ValueError(f"configuração inválida: {e}") from None
         return v
 
 

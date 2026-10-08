@@ -80,7 +80,7 @@ export function NotificacoesProvider({ children }: { children: ReactNode }) {
 const FOCAVEIS = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 export function Dialog({
-  titulo, descricao, onClose, children, rodape, largura = 560, tela = false,
+  titulo, descricao, onClose, children, rodape, largura = 560, tela = false, fecharAoClicarFora = true,
 }: {
   titulo: string
   descricao?: string
@@ -89,6 +89,7 @@ export function Dialog({
   rodape?: ReactNode
   largura?: number
   tela?: boolean
+  fecharAoClicarFora?: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const corpo = useRef<HTMLDivElement>(null)
@@ -131,7 +132,7 @@ export function Dialog({
   }
 
   return createPortal(
-    <div className="dialog-fundo" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+    <div className="dialog-fundo" onMouseDown={(e) => { if (fecharAoClicarFora && e.target === e.currentTarget) onClose() }}>
       <div
         ref={ref} role="dialog" aria-modal="true" aria-labelledby={idTitulo}
         aria-describedby={descricao ? idDescricao : undefined} tabIndex={-1}

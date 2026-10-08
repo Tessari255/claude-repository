@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .custom_blocks import erros_pydantic
 from .errors import ApiError
@@ -26,8 +26,8 @@ TAMANHO_MAX = 5 * 1024 * 1024
 
 class InfoProjeto(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str
-    description: str = ""
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
 
 
 class Envelope(BaseModel):
@@ -37,7 +37,7 @@ class Envelope(BaseModel):
     exported_at: str | None = None
     project: InfoProjeto
     flow: Flow
-    custom_blocks: list[BlockType] = []
+    custom_blocks: list[BlockType] = Field(default_factory=list, max_length=50)
 
 
 def exportar(registro: Registro, nome: str, descricao: str, flow: Flow) -> dict[str, Any]:
@@ -73,6 +73,16 @@ def importar(store: Store, registro: Registro, bruto: Any, *, aplicar: bool = Tr
                        problemas=erros_pydantic(e), sugestao="Escolha um arquivo .json exportado pela própria Trama.") from None
 
     avisos: list[str] = []
+    repetidos = sorted({f"{t.id} v{t.version}" for t in env.custom_blocks
+                        if sum(1 for o in env.custom_blocks if (o.id, o.version) == (t.id, t.version)) > 1})
+    if repetidos:
+        raise ApiError(422, "arquivo_invalido", f"O arquivo repete a definição de bloco: {', '.join(repetidos)}.")
+    # só entram na biblioteca os blocos que o fluxo realmente usa
+    usados = {(b.type, b.version) for b in env.flow.blocks}
+    descartados = [t.name for t in env.custom_blocks if (t.id, t.version) not in usados]
+    if descartados:
+        avisos.append(f"Blocos do arquivo que o fluxo não usa foram ignorados: {', '.join(descartados[:5])}.")
+    env.custom_blocks[:] = [t for t in env.custom_blocks if (t.id, t.version) in usados]
     for t in env.custom_blocks:
         if t.kind != "python" or not t.id.startswith("custom."):
             raise ApiError(422, "arquivo_invalido", f"O bloco “{t.name}” do arquivo não é um bloco personalizado válido.")

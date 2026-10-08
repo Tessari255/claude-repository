@@ -79,7 +79,8 @@ def novo_id(prefixo: str) -> str:
 
 
 def _dump(v: Any) -> str | None:
-    return None if v is None else json.dumps(v, ensure_ascii=False)
+    # ensure_ascii=True: o texto gravado é ASCII puro (sem erro de codificação, mesmo com caracteres incomuns)
+    return None if v is None else json.dumps(v, ensure_ascii=True)
 
 
 def _load(v: str | None) -> Any:
@@ -202,7 +203,20 @@ class Store:
                           (t.id, t.version, t.name, t.model_dump_json(), t.created_at))
         return criados
 
+    def inserir_nova_versao(self, tipo: BlockType) -> BlockType:
+        """Cria a próxima versão de `tipo.id` de forma atômica (várias edições simultâneas não colidem)."""
+        with self._transacao() as c:
+            r = c.execute("SELECT MAX(version) AS v FROM block_types WHERE id = ?", (tipo.id,)).fetchone()
+            if r["v"] is None:
+                raise ApiError(404, "bloco_nao_encontrado", "Bloco não encontrado.")
+            criado = tipo.model_copy(update={"version": r["v"] + 1, "created_at": agora()})
+            c.execute("INSERT INTO block_types (id, version, name, definition, created_at) VALUES (?, ?, ?, ?, ?)",
+                      (criado.id, criado.version, criado.name, criado.model_dump_json(), criado.created_at))
+        return criado
+
     def obter_tipo(self, type_id: str, version: int) -> BlockType | None:
+        if not 0 < version <= 1_000_000:
+            return None  # fora da faixa do SQLite/dos modelos: não existe
         with self._conexao() as c:
             r = c.execute("SELECT definition FROM block_types WHERE id = ? AND version = ?",
                           (type_id, version)).fetchone()

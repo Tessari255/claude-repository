@@ -1,9 +1,9 @@
 import { formatarDuracao, formatarValor } from '../lib/visual'
 import type { Run } from '../types'
+import { classeOrigem, rotuloOrigem } from '../lib/visual'
 import { Icon } from './Icons'
 import { Aviso, Detalhes, EstadoBadge } from './ui'
 
-const ROTULO_ORIGEM = { stdout: 'saída', stderr: 'erro', system: 'sistema' } as const
 
 /** Resultado de um teste isolado de bloco: saídas, logs e erro (com linha e detalhes técnicos). */
 export function ResultadoDoTeste({ run }: { run: Run }) {
@@ -37,7 +37,7 @@ export function ResultadoDoTeste({ run }: { run: Run }) {
       {passo && passo.logs.length > 0 && (
         <>
           <h4>Logs</h4>
-          {passo.logs.map((l, i) => <pre key={i} className={`log log-${l.source}`}><span className="log-origem">{ROTULO_ORIGEM[l.source]}</span>{l.text}</pre>)}
+          {passo.logs.map((l, i) => <pre key={i} className={`log log-${classeOrigem(l.source)}`}><span className="log-origem">{rotuloOrigem(l.source)}</span>{l.text}</pre>)}
         </>
       )}
     </div>

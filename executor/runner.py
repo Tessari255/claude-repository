@@ -8,7 +8,7 @@ Protocolo
 * stdin : um único JSON com o trabalho
           ``{token, mode, code, inputs, params, items, limits}``.
           ``mode`` é ``block`` (chama run), ``map`` (chama transformar em cada item)
-          ou ``check`` (só valida o código).
+          ou ``check`` (carrega o código como na execução real e confere a função).
 * stdout: texto livre do código do usuário que escape da captura (ex.: escrita
           direta no descritor 1) e, na última linha, a resposta do runner no
           formato  ``<PREFIXO><token><json>``.  O token é aleatório por execução
@@ -19,7 +19,6 @@ A lista de bibliotecas permitidas abaixo é uma camada extra de usabilidade
 ("defesa em profundidade") e NÃO deve ser tratada como isolamento.
 """
 
-import ast
 import builtins
 import inspect
 import json
@@ -55,6 +54,15 @@ class SaidaExcessiva(Exception):
 
 class RetornoInvalido(Exception):
     """O retorno de run() não segue o contrato (não é dict ou não é JSON)."""
+
+
+class ErroDeContrato(Exception):
+    """A função existe mas não segue o contrato (ex.: parâmetros errados)."""
+
+    def __init__(self, mensagem, linha=None, trecho=None):
+        super().__init__(mensagem)
+        self.linha = linha
+        self.trecho = trecho
 
 
 class ErroNoItem(Exception):
@@ -219,16 +227,6 @@ def _erro_simples(categoria, tipo, mensagem, linha=None, trecho=None):
             "line": linha, "snippet": trecho, "traceback": ""}
 
 
-def _verificar(codigo):
-    """Checagem estática (feita aqui dentro, nunca na API)."""
-    try:
-        arvore = ast.parse(codigo, filename=ARQUIVO)
-    except SyntaxError as exc:
-        return None, _descrever(exc, codigo.splitlines(), "sintaxe")
-    funcoes = {n.name: n for n in arvore.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    return funcoes, None
-
-
 def _aceita_dois(funcao):
     try:
         parametros = list(inspect.signature(funcao).parameters.values())
@@ -238,37 +236,31 @@ def _aceita_dois(funcao):
     return len(posicionais) >= 2 or any(p.kind == p.VAR_POSITIONAL for p in parametros)
 
 
-def _modo_check(codigo, linhas):
-    funcoes, erro = _verificar(codigo)
-    if erro:
-        return {"ok": False, "error": erro, "logs": []}
-    funcao = funcoes.get("run")
-    if funcao is None:
-        return {"ok": False, "logs": [], "error": _erro_simples(
-            "funcao_ausente", "FuncaoAusente",
-            "O código precisa definir a função `def run(inputs, params):`.")}
-    args = funcao.args
-    if len(args.posonlyargs) + len(args.args) < 2 and args.vararg is None:
-        return {"ok": False, "logs": [], "error": _erro_simples(
-            "funcao_ausente", "AssinaturaInvalida",
-            "A função run precisa receber dois parâmetros: `def run(inputs, params):`.",
-            funcao.lineno, linhas[funcao.lineno - 1].strip())}
-    return {"ok": True, "logs": []}
-
-
-def _executar(trabalho, codigo, limites):
-    """Executa o código do usuário e devolve o payload (dict) ou levanta uma exceção."""
-    modo = trabalho.get("mode", "block")
+def _carregar(codigo, nome):
+    """Compila e executa o código do módulo (como na execução real) e devolve a função pedida."""
     ambiente = {"__name__": "__bloco__", "__builtins__": _builtins_do_usuario()}
     exec(compile(codigo, ARQUIVO, "exec"), ambiente)
-    nome = "transformar" if modo == "map" else "run"
     funcao = ambiente.get(nome)
     if not callable(funcao):
         raise NameError(
             "O código precisa definir a função `def transformar(item):`."
-            if modo == "map"
+            if nome == "transformar"
             else "O código precisa definir a função `def run(inputs, params):`."
         )
+    return funcao
+
+
+def _executar(trabalho, codigo, limites, linhas):
+    """Executa o código do usuário e devolve o payload (dict) ou levanta uma exceção."""
+    modo = trabalho.get("mode", "block")
+    funcao = _carregar(codigo, "transformar" if modo == "map" else "run")
+    if modo == "check":
+        if not _aceita_dois(funcao):
+            linha = getattr(getattr(funcao, "__code__", None), "co_firstlineno", None)
+            raise ErroDeContrato(
+                "A função run precisa receber dois parâmetros: `def run(inputs, params):`.",
+                linha, linhas[linha - 1].strip() if linha and 1 <= linha <= len(linhas) else None)
+        return {}
     if modo == "map":
         dois = _aceita_dois(funcao)
         resultado = []
@@ -296,6 +288,7 @@ def main():
     token = ""
     logs = Logs(64 * 1024)
     linhas = []
+    tempo_s = 10.0
     stdout_real, stderr_real = sys.stdout, sys.stderr
     try:
         trabalho = json.loads(sys.stdin.read())
@@ -311,24 +304,16 @@ def main():
             limite_bytes = memoria_mb * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (limite_bytes, limite_bytes))
 
-        if trabalho.get("mode") == "check":
-            _emitir(token, _modo_check(codigo, linhas))
-            return
-
-        _, erro_sintaxe = _verificar(codigo)
-        if erro_sintaxe:
-            _emitir(token, {"ok": False, "error": erro_sintaxe, "logs": []})
-            return
-
         def _estourou(*_):
             raise TempoEsgotado()
 
         sys.stdout, sys.stderr = Fluxo(logs, "stdout"), Fluxo(logs, "stderr")
         signal.signal(signal.SIGALRM, _estourou)
-        signal.setitimer(signal.ITIMER_REAL, max(tempo_s, 0.05))
+        # re-arma a cada 250 ms: um `except BaseException` que engole o aviso é interrompido de novo
+        signal.setitimer(signal.ITIMER_REAL, max(tempo_s, 0.05), 0.25)
         inicio = time.monotonic()
         try:
-            payload = _executar(trabalho, codigo, limites)
+            payload = _executar(trabalho, codigo, limites, linhas)
             resposta = {"ok": True, "payload": payload,
                         "duration_ms": int((time.monotonic() - inicio) * 1000)}
         except TempoEsgotado as exc:
@@ -343,6 +328,9 @@ def main():
             resposta = {"ok": False, "error": info}
         except RetornoInvalido as exc:
             resposta = {"ok": False, "error": _descrever(exc, linhas, "retorno_invalido")}
+        except ErroDeContrato as exc:
+            resposta = {"ok": False, "error": _erro_simples(
+                "funcao_ausente", "AssinaturaInvalida", str(exc), exc.linha, exc.trecho)}
         except ErroNoItem as exc:
             info = _descrever(exc.original, linhas)
             info["item_index"] = exc.indice
@@ -358,7 +346,12 @@ def main():
         resposta["logs"] = logs.pedacos
         _emitir(token, resposta)
     except BaseException as exc:  # noqa: BLE001 — falha do próprio runner
+        signal.setitimer(signal.ITIMER_REAL, 0)
         sys.stdout, sys.stderr = stdout_real, stderr_real
+        if isinstance(exc, TempoEsgotado):  # o aviso chegou durante o tratamento de outro erro
+            _emitir(token, {"ok": False, "logs": logs.pedacos, "error": _erro_simples(
+                "tempo_esgotado", "TempoEsgotado", "O tempo máximo de %g s foi excedido." % tempo_s)})
+            return
         _emitir(token, {"ok": False, "logs": logs.pedacos, "error": {
             "category": "erro_interno", "type": type(exc).__name__, "message": str(exc)[:500],
             "line": None, "snippet": None, "traceback": traceback.format_exc()[-3000:]}})

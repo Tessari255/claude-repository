@@ -11,6 +11,7 @@ import {
 import { corDaCategoria, slugDeId } from '../lib/visual'
 import type { BlockType, Issue, PortTypes, Project, Run, SystemInfo } from '../types'
 import { BlockEditorDialog } from './BlockEditorDialog'
+import { ErrorBoundary } from './ErrorBoundary'
 import { BlockNodeComponent, descricaoDoNo } from './BlockNode'
 import { BottomPanel, type Aba } from './BottomPanel'
 import { ConfigPanel, type AcoesConfig } from './ConfigPanel'
@@ -576,12 +577,15 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
         )}
       </div>
 
+      <ErrorBoundary titulo="Não foi possível exibir os resultados" resetKey={run?.id}
+        acao={<button className="btn btn-pequeno" onClick={() => setRun(null)}>Limpar resultado</button>}>
       <BottomPanel
         aba={aba} onAba={setAba} run={run} executando={executando} nomes={nomes} problemas={analise.issues}
         historico={historico} onAbrirExecucao={(id) => void abrirExecucao(id)} onIrParaBloco={irParaBloco}
         aberto={painelAberto} onAlternar={() => setPainelAberto((v) => !v)} altura={altura} onAltura={setAltura}
         onExecutar={() => void executar()} onLimpar={() => setRun(null)}
       />
+      </ErrorBoundary>
 
       {dialogo?.tipo === 'testar' && noTeste?.data.def && (
         <TestarBlocoDialog no={noTeste} projectId={projeto.id} onClose={() => setDialogo(null)} />
