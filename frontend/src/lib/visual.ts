@@ -28,14 +28,20 @@ export const FORMA_TIPO: Record<TipoDado, string> = {
   qualquer: 'anel',
 }
 
+/** Cada categoria tem uma cor (todas passam em contraste 4,5:1 com texto branco) e o ícone do passo reforça o significado. */
 export const COR_CATEGORIA: Record<string, string> = {
-  'Entrada e saída': '#26457A',
+  Gatilhos: '#26457A',
+  Controle: '#B5452E',
+  'Variáveis': '#8C2F4E',
   Dados: '#1F6F8B',
-  'Cálculo': '#8A5A00',
   Texto: '#7B3F73',
-  'Controle de fluxo': '#B5452E',
+  'Cálculo': '#8A5A00',
+  Python: '#2F6F4E',
+  'Saída': '#4A5263',
   Personalizados: '#2F6F4E',
 }
+
+export const ORDEM_CATEGORIAS = ['Controle', 'Variáveis', 'Dados', 'Texto', 'Cálculo', 'Python', 'Saída', 'Personalizados']
 
 export function corDaCategoria(categoria: string): string {
   return COR_CATEGORIA[categoria] ?? '#2F6F4E'
@@ -47,6 +53,7 @@ export const ROTULO_ESTADO: Record<Estado, string> = {
   concluido: 'Concluído',
   falhou: 'Falhou',
   ignorado: 'Ignorado',
+  cancelado: 'Cancelado',
 }
 
 export const ICONE_ESTADO: Record<Estado, string> = {
@@ -55,6 +62,20 @@ export const ICONE_ESTADO: Record<Estado, string> = {
   concluido: 'check',
   falhou: 'x',
   ignorado: 'skip',
+  cancelado: 'stop',
+}
+
+/** Ícone de cada bloco interno; blocos Python (inline ou da biblioteca) usam o ícone de código. */
+export const ICONE_BLOCO: Record<string, string> = {
+  'builtin.gatilho_manual': 'bolt', 'builtin.condicao': 'branch', 'builtin.para_cada': 'loop', 'builtin.repetir_ate': 'loop',
+  'builtin.escopo': 'scope', 'builtin.encerrar': 'stop', 'builtin.var_inicializar': 'var', 'builtin.var_definir': 'var',
+  'builtin.var_incrementar': 'var', 'builtin.var_acrescentar': 'var', 'builtin.compor': 'value', 'builtin.selecionar_campos': 'pick',
+  'builtin.transformar_lista': 'loop', 'builtin.texto': 'text', 'builtin.matematica': 'calc', 'builtin.python': 'python',
+  'builtin.saida': 'flag',
+}
+
+export function iconeDoBloco(id: string, kind?: string): string {
+  return ICONE_BLOCO[id] ?? (kind === 'python' || id.startsWith('custom.') ? 'python' : 'value')
 }
 
 export function formatarDuracao(ms: number | null | undefined): string {

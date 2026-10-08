@@ -1,5 +1,5 @@
 import {
-  createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState,
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
@@ -207,5 +207,87 @@ export function Detalhes({ resumo, children, aberto }: { resumo: string; childre
       <summary>{resumo}</summary>
       <div className="detalhes-corpo">{children}</div>
     </details>
+  )
+}
+
+// ------------------------------------------------------------------ menu de ações (⋯)
+export interface ItemDeMenu {
+  rotulo: string
+  icone?: string
+  perigo?: boolean
+  desabilitado?: boolean
+  onClick: () => void
+}
+
+/** Menu acessível: abre com Enter/Espaço/Seta para baixo, navega com as setas e fecha com Esc, Tab ou clique fora. */
+export function MenuDeAcoes({ rotulo, itens, classe }: { rotulo: string; itens: ItemDeMenu[]; classe?: string }) {
+  const [aberto, setAberto] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const botao = useRef<HTMLButtonElement>(null)
+  const lista = useRef<HTMLUListElement>(null)
+  const id = useId()
+
+  useLayoutEffect(() => {
+    if (!aberto || !botao.current) return
+    const r = botao.current.getBoundingClientRect()
+    const largura = 220
+    setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(window.innerWidth - largura - 8, r.right - largura)) })
+  }, [aberto])
+
+  useEffect(() => {
+    if (!aberto) return
+    lista.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus()
+    const fora = (e: MouseEvent) => {
+      const alvo = e.target as Node
+      if (!lista.current?.contains(alvo) && !botao.current?.contains(alvo)) setAberto(false)
+    }
+    const rolagem = () => setAberto(false)
+    document.addEventListener('mousedown', fora)
+    window.addEventListener('scroll', rolagem, true)
+    window.addEventListener('resize', rolagem)
+    return () => {
+      document.removeEventListener('mousedown', fora)
+      window.removeEventListener('scroll', rolagem, true)
+      window.removeEventListener('resize', rolagem)
+    }
+  }, [aberto])
+
+  function fechar(devolverFoco = true) {
+    setAberto(false)
+    if (devolverFoco) botao.current?.focus()
+  }
+
+  function aoTeclarNoMenu(e: React.KeyboardEvent) {
+    const itensEl = Array.from(lista.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [])
+    const i = itensEl.indexOf(document.activeElement as HTMLElement)
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); fechar() }
+    else if (e.key === 'Tab') setAberto(false)
+    else if (e.key === 'ArrowDown') { e.preventDefault(); itensEl[(i + 1) % itensEl.length]?.focus() }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); itensEl[(i - 1 + itensEl.length) % itensEl.length]?.focus() }
+    else if (e.key === 'Home') { e.preventDefault(); itensEl[0]?.focus() }
+    else if (e.key === 'End') { e.preventDefault(); itensEl[itensEl.length - 1]?.focus() }
+  }
+
+  return (
+    <>
+      <button ref={botao} type="button" className={`btn-icone ${classe ?? ''}`} aria-label={rotulo} aria-haspopup="menu" aria-expanded={aberto}
+        aria-controls={aberto ? id : undefined} onClick={(e) => { e.stopPropagation(); setAberto((v) => !v) }}
+        onKeyDown={(e) => { if (e.key === 'ArrowDown') { e.preventDefault(); setAberto(true) } }}>
+        <Icon name="more" size={18} />
+      </button>
+      {aberto && pos && createPortal(
+        <ul ref={lista} id={id} role="menu" aria-label={rotulo} className="menu" style={{ top: pos.top, left: pos.left }} onKeyDown={aoTeclarNoMenu}>
+          {itens.map((it) => (
+            <li key={it.rotulo} role="none">
+              <button type="button" role="menuitem" disabled={it.desabilitado} className={it.perigo ? 'menu-perigo' : undefined}
+                onClick={() => { fechar(false); it.onClick() }}>
+                {it.icone && <Icon name={it.icone} size={16} />} {it.rotulo}
+              </button>
+            </li>
+          ))}
+        </ul>,
+        document.body,
+      )}
+    </>
   )
 }

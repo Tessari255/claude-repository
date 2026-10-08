@@ -15,6 +15,8 @@ interface Props {
   obrigatorio?: boolean
   erro?: string | null
   desabilitado?: boolean
+  /** O rótulo já é mostrado por quem usa o campo: aqui ele só nomeia o controle para leitores de tela. */
+  semRotulo?: boolean
 }
 
 const DICA_JSON: Record<string, string> = {
@@ -37,7 +39,7 @@ function analisar(texto: string, tipo: string): { ok: true; valor: unknown } | {
 }
 
 export function ValueField({
-  tipo, valor, onChange, rotulo, opcoes, multilinha, placeholder, ajuda, obrigatorio, erro, desabilitado,
+  tipo, valor, onChange, rotulo, opcoes, multilinha, placeholder, ajuda, obrigatorio, erro, desabilitado, semRotulo,
 }: Props) {
   const id = useId()
   const idAjuda = `${id}-ajuda`
@@ -62,7 +64,7 @@ export function ValueField({
   const descricao = [ajuda ? idAjuda : '', mensagemErro ? idErro : ''].filter(Boolean).join(' ') || undefined
   const comum = {
     id, 'aria-describedby': descricao, 'aria-invalid': mensagemErro ? true : undefined,
-    'aria-required': obrigatorio || undefined, disabled: desabilitado,
+    'aria-required': obrigatorio || undefined, disabled: desabilitado, 'aria-label': semRotulo ? rotulo : undefined,
   } as const
 
   let campo: JSX.Element
@@ -106,10 +108,12 @@ export function ValueField({
   }
 
   return (
-    <div className="campo">
-      <label htmlFor={tipo === 'codigo' ? undefined : id}>
-        {rotulo}{obrigatorio && <span className="obrigatorio" aria-hidden="true"> *</span>}
-      </label>
+    <div className={semRotulo ? 'campo-simples' : 'campo'}>
+      {!semRotulo && (
+        <label htmlFor={tipo === 'codigo' ? undefined : id}>
+          {rotulo}{obrigatorio && <span className="obrigatorio" aria-hidden="true"> *</span>}
+        </label>
+      )}
       {campo}
       {ajuda && <p id={idAjuda} className="campo-ajuda">{ajuda}</p>}
       {mensagemErro && <p id={idErro} className="campo-erro" role="alert">{mensagemErro}</p>}

@@ -155,6 +155,15 @@ def test_historico_guarda_o_fluxo_da_execucao_e_as_repeticoes_de_cada_passo(clie
     assert [s["iteration"] for s in run["steps"] if s["step_id"] == "x"] == [[0], [1], [2]]
 
 
+def test_a_execucao_guarda_o_fluxo_da_epoca_mesmo_se_o_projeto_mudar_depois(client):
+    p = projeto_soma(client)
+    run = aguardar(client, client.post(f"/api/projetos/{p['id']}/execucoes", json={}).json()["id"])
+    assert "flow" not in client.get(f"/api/execucoes/{run['id']}").json()  # o acompanhamento não carrega o fluxo a cada consulta
+    client.put(f"/api/projetos/{p['id']}", json={"flow": fluxo([compor("a", lit(1))])})
+    antigo = client.get(f"/api/execucoes/{run['id']}?fluxo=true").json()
+    assert [s["id"] for s in antigo["flow"]["steps"]] == ["s", "o"] and "snapshot" not in antigo
+
+
 def test_cancelar_uma_execucao_em_andamento(client):
     f = fluxo([matematica("quebra", lit(1), lit(0), "dividir", retry=5, intervalo=30)])
     p = client.post("/api/projetos", json={"name": "lenta", "flow": f}).json()

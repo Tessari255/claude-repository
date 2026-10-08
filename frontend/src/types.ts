@@ -1,8 +1,9 @@
 // Tipos que espelham o contrato da API (chaves em inglês, valores em português).
 
 export type TipoDado = 'texto' | 'numero' | 'booleano' | 'lista' | 'json' | 'qualquer'
-export type TipoParametro = 'texto' | 'numero' | 'booleano' | 'lista' | 'json' | 'selecao' | 'codigo'
-export type Estado = 'aguardando' | 'executando' | 'concluido' | 'falhou' | 'ignorado'
+export type TipoParametro = 'texto' | 'numero' | 'booleano' | 'lista' | 'json' | 'selecao' | 'codigo' | 'regras' | 'portas' | 'variavel'
+export type Estado = 'aguardando' | 'executando' | 'concluido' | 'falhou' | 'ignorado' | 'cancelado'
+export type ExecutarApos = 'sucesso' | 'falhou' | 'ignorado' | 'expirou'
 
 export interface PortDef {
   id: string
@@ -11,7 +12,9 @@ export interface PortDef {
   required: boolean
   description: string
   type_from?: { param?: string | null; input?: string | null } | null
-  conditional: boolean
+  conditional?: boolean
+  inside?: boolean
+  default?: unknown
 }
 
 export interface ParamDef {
@@ -31,6 +34,13 @@ export interface ParamDef {
   visible_when?: { param: string; values: string[] } | null
 }
 
+export interface SlotDef {
+  id: string
+  label: string
+  transparent: boolean
+  empty_hint: string
+}
+
 export interface BlockType {
   id: string
   version: number
@@ -44,28 +54,45 @@ export interface BlockType {
   params: ParamDef[]
   code: string | null
   created_at: string | null
+  slots: SlotDef[]
+  inputs_from: string | null
+  outputs_from: string | null
+  trigger: boolean
 }
 
-export interface BlockInstance {
+// ------------------------------------------------------------------ fluxo em passos
+export interface Ref {
+  step: string
+  output: string
+  path: string
+}
+
+/** O valor de um campo: valor fixo ou conteúdo dinâmico (textos soltos e referências, como os “chips” do Power Automate). */
+export type Campo = { value: unknown } | { parts: (string | Ref)[] }
+
+export interface Passo {
   id: string
   type: string
   version: number
-  position: { x: number; y: number }
+  label?: string | null
+  note?: string | null
+  inputs: Record<string, Campo>
   params: Record<string, unknown>
-  label: string | null
-}
-
-export interface Connection {
-  id: string
-  source: { block: string; port: string }
-  target: { block: string; port: string }
+  run_after?: ExecutarApos[]
+  settings?: { retry: { count: number; interval_s: number }; timeout_s: number | null }
+  slots?: Record<string, Passo[]>
 }
 
 export interface Flow {
-  schema_version: number
-  blocks: BlockInstance[]
-  connections: Connection[]
-  viewport: { x: number; y: number; zoom: number } | null
+  schema_version: 2
+  trigger: Passo
+  steps: Passo[]
+}
+
+export interface Regra {
+  esq: Campo
+  op: string
+  dir?: Campo | null
 }
 
 export interface Issue {
@@ -74,15 +101,12 @@ export interface Issue {
   scope: 'estrutura' | 'configuracao'
   message: string
   hint?: string | null
-  block_id?: string | null
-  port?: string | null
-  param?: string | null
-  connection_id?: string | null
-  connection_ids?: string[]
+  step_id?: string | null
+  field?: string | null
 }
 
 export interface PortTypes {
-  [blockId: string]: { inputs: Record<string, TipoDado>; outputs: Record<string, TipoDado> }
+  [stepId: string]: { inputs: Record<string, TipoDado>; outputs: Record<string, TipoDado> }
 }
 
 export interface Project {
@@ -96,10 +120,21 @@ export interface Project {
 }
 
 export interface ProjectSummary extends Omit<Project, 'flow'> {
-  block_count: number
+  step_count: number
   last_run_state: Estado | null
+  last_run_at: string | null
+  run_count: number
 }
 
+export interface Modelo {
+  id: string
+  name: string
+  description: string
+  step_count: number
+  file: unknown
+}
+
+// ------------------------------------------------------------------ execuções
 export interface LogChunk {
   source: 'stdout' | 'stderr' | 'system'
   text: string
@@ -119,8 +154,10 @@ export interface StepError {
   } | null
 }
 
+/** Uma linha do histórico: um passo em uma repetição (``iteration`` vazio = fora de laços). */
 export interface Step {
-  block_id: string
+  step_id: string
+  iteration: number[]
   position: number
   state: Estado
   started_at: string | null
@@ -134,8 +171,8 @@ export interface Step {
 }
 
 export interface RunError extends StepError {
-  block_id: string
-  block_name: string
+  step_id: string
+  step_name: string
   line?: number | null
 }
 
@@ -148,7 +185,8 @@ export interface Run {
   started_at: string | null
   finished_at: string | null
   duration_ms: number | null
-  result: { outputs: { block_id: string; title: string; value: unknown }[] } | null
+  trigger_inputs: Record<string, unknown>
+  result: { outputs: { step_id: string; title: string; value: unknown }[]; message?: string } | null
   error: RunError | null
   steps: Step[]
 }

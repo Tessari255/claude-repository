@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { api, ApiFailure } from '../api'
-import { valorPadraoDoTipo } from '../lib/flow'
+import { valorPadraoDoTipo } from '../lib/modelo'
 import { ROTULO_TIPO_LONGO, slugDeId } from '../lib/visual'
 import type { BlockDraft, BlockType, Issue, ParamDef, PortDef, Run, TipoDado, TipoParametro } from '../types'
 import { CodeEditor } from './CodeEditor'
@@ -18,8 +18,8 @@ interface LinhaPorta { id: string; label: string; type: TipoDado; required: bool
 interface LinhaParam { id: string; label: string; type: TipoParametro; required: boolean; default: unknown; help: string; idAuto: boolean; original?: ParamDef }
 
 const CODIGO_INICIAL = `def run(inputs: dict, params: dict) -> dict:
-    # inputs: os dados que chegam pelas conexões, pelo nome de cada entrada.
-    # params: a configuração definida pelo usuário no painel do bloco.
+    # inputs: os dados que o passo recebe, pelo nome de cada entrada.
+    # params: a configuração do bloco, definida no painel do passo.
     # Devolva um dicionário com as saídas declaradas ao lado.
     nome = inputs.get("nome", "mundo")
     return {"mensagem": f"Olá, {nome}!"}
@@ -61,9 +61,11 @@ function problemasDeIds(linhas: { id: string }[], rotulo: string): string[] {
 }
 
 export function BlockEditorDialog({
-  editar, baseVersao, categorias, executorOk, onClose, onSalvo, onExcluido,
+  editar, modelo, baseVersao, categorias, executorOk, onClose, onSalvo, onExcluido,
 }: {
   editar?: BlockType
+  /** Valores iniciais de um bloco NOVO (ex.: criado a partir de um passo de código Python do fluxo). */
+  modelo?: BlockType
   baseVersao?: number
   categorias: string[]
   executorOk: boolean
@@ -71,15 +73,16 @@ export function BlockEditorDialog({
   onSalvo: (b: BlockType, avisos: string[]) => void
   onExcluido?: () => void
 }) {
-  const [nome, setNome] = useState(editar?.name ?? '')
-  const [descricao, setDescricao] = useState(editar?.description ?? '')
-  const [categoria, setCategoria] = useState(editar?.category ?? 'Personalizados')
+  const base = editar ?? modelo
+  const [nome, setNome] = useState(base?.name ?? '')
+  const [descricao, setDescricao] = useState(base?.description ?? '')
+  const [categoria, setCategoria] = useState(base?.category ?? 'Personalizados')
   const [entradas, setEntradas] = useState<LinhaPorta[]>(
-    editar ? editar.inputs.map(dePorta) : [{ id: 'nome', label: 'Nome', type: 'texto', required: false, description: '', idAuto: false }])
+    base ? base.inputs.map(dePorta) : [{ id: 'nome', label: 'Nome', type: 'texto', required: false, description: '', idAuto: false }])
   const [saidas, setSaidas] = useState<LinhaPorta[]>(
-    editar ? editar.outputs.map(dePorta) : [{ id: 'mensagem', label: 'Mensagem', type: 'texto', required: true, description: '', idAuto: false }])
-  const [params, setParams] = useState<LinhaParam[]>(editar ? editar.params.map(deParam) : [])
-  const [codigo, setCodigo] = useState(editar?.code ?? CODIGO_INICIAL)
+    base ? base.outputs.map(dePorta) : [{ id: 'mensagem', label: 'Mensagem', type: 'texto', required: true, description: '', idAuto: false }])
+  const [params, setParams] = useState<LinhaParam[]>(base ? base.params.map(deParam) : [])
+  const [codigo, setCodigo] = useState(base?.code ?? CODIGO_INICIAL)
 
   const [valoresTeste, setValoresTeste] = useState<Record<string, unknown>>({})
   const [usarTeste, setUsarTeste] = useState<Record<string, boolean>>({})
@@ -228,7 +231,7 @@ export function BlockEditorDialog({
           </div>
 
           <TabelaPortas titulo="Entradas" rotulo="entrada" linhas={entradas} comObrigatoria
-            ajuda="O que o bloco recebe pelas conexões. No código: inputs[“identificador”]."
+            ajuda="O que o bloco recebe dos passos anteriores. No código: inputs[“identificador”]."
             onChange={(i, m) => atualizarLinha(entradas, setEntradas, i, m)}
             onAdicionar={() => setEntradas([...entradas, { id: '', label: '', type: 'texto', required: true, description: '', idAuto: true }])}
             onRemover={(i) => setEntradas(entradas.filter((_, k) => k !== i))} />

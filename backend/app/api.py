@@ -241,8 +241,9 @@ def criar_router(s: Servicos) -> APIRouter:
         return s.store.listar_execucoes(pid, max(1, min(limite, 100)))
 
     @r.get("/execucoes/{rid}")
-    def obter_execucao(rid: str) -> dict[str, Any]:
-        e = s.store.obter_execucao(rid)
+    def obter_execucao(rid: str, fluxo: bool = False) -> dict[str, Any]:
+        """``?fluxo=true`` inclui o fluxo como foi executado (a versão da época, não a atual)."""
+        e = s.store.obter_execucao(rid, com_fluxo=fluxo)
         if e is None:
             raise ApiError(404, "execucao_nao_encontrada", "Execução não encontrada.")
         return e

@@ -1,5 +1,5 @@
 import type {
-  BlockDraft, BlockType, Flow, Issue, PortTypes, Project, ProjectSummary, Run, StepError, SystemInfo,
+  BlockDraft, BlockType, Flow, Issue, Modelo, PortTypes, Project, ProjectSummary, Run, StepError, SystemInfo,
 } from './types'
 
 export class ApiFailure extends Error {
@@ -70,11 +70,12 @@ export const api = {
 
   validar: (flow: Flow) =>
     request<{ valid: boolean; issues: Issue[]; port_types: PortTypes }>('POST', '/fluxos/validar', { flow }),
-  validarConexao: (flow: Flow, connection: Flow['connections'][number]) =>
-    request<{ ok: boolean; issues: Issue[] }>('POST', '/fluxos/validar-conexao', { flow, connection }),
+  modelos: () => request<Modelo[]>('GET', '/modelos'),
 
-  executar: (projectId: string, flow: Flow, initial_data?: Record<string, unknown>) =>
-    request<Run>('POST', `/projetos/${projectId}/execucoes`, { flow, initial_data }),
+  executar: (projectId: string, flow: Flow, trigger_inputs?: Record<string, unknown>) =>
+    request<Run>('POST', `/projetos/${projectId}/execucoes`, { flow, trigger_inputs }),
   execucao: (id: string) => request<Run>('GET', `/execucoes/${id}`),
+  execucaoComFluxo: (id: string) => request<Run & { flow: Flow }>('GET', `/execucoes/${id}?fluxo=true`),
+  cancelarExecucao: (id: string) => request<{ cancelling: boolean }>('POST', `/execucoes/${id}/cancelar`),
   historico: (projectId: string) => request<Run[]>('GET', `/projetos/${projectId}/execucoes`),
 }

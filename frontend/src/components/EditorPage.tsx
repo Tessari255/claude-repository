@@ -1,48 +1,29 @@
-import {
-  Background, BackgroundVariant, MarkerType, MiniMap, Panel, ReactFlow, ReactFlowProvider, SelectionMode,
-  useEdgesState, useNodesState, useReactFlow,
-} from '@xyflow/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import {
-  aleatorio, chaveDoTipo, conexaoDe, deFluxo, duplicar, paraFluxo, paramsIniciais, valorPadraoDoTipo,
-  type BlockNode, type FlowEdge,
-} from '../lib/flow'
-import { corDaCategoria, slugDeId } from '../lib/visual'
-import type { BlockType, Issue, PortTypes, Project, Run, SystemInfo } from '../types'
+  achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
+  remover, todosOsPassos, usaOPasso, MAX_PROFUNDIDADE, type Destino,
+} from '../lib/modelo'
+import { useHistorico } from '../lib/useHistorico'
+import { slugDeId } from '../lib/visual'
+import type { BlockType, Flow, Issue, Passo, PortTypes, Project, Run, SystemInfo } from '../types'
 import { BlockEditorDialog } from './BlockEditorDialog'
+import { Designer, type AcaoDoPasso } from './Designer'
+import { AtalhosDialog } from './Dialogs'
 import { ErrorBoundary } from './ErrorBoundary'
-import { BlockNodeComponent, descricaoDoNo } from './BlockNode'
-import { BottomPanel, type Aba } from './BottomPanel'
-import { ConfigPanel, type AcoesConfig } from './ConfigPanel'
-import { AtalhosDialog, ExecutarComDadosDialog, TestarBlocoDialog } from './Dialogs'
+import { Historico } from './Historico'
 import { Icon, Logo } from './Icons'
-import { Library, MIME_BLOCO } from './Library'
+import { PainelPasso, type Aplicar } from './PainelPasso'
+import { PainelTeste } from './PainelTeste'
+import { SeletorDeBloco } from './SeletorDeBloco'
 import { Aviso, Confirmar, Dialog, useNotificar } from './ui'
+import { Verificador } from './Verificador'
 
-const TIPOS_DE_NO = { block: BlockNodeComponent }
-
-const ROTULOS_RF = {
-  'node.a11yDescription.default':
-    'Pressione Enter ou Espaço para selecionar este bloco. Use as setas para movê-lo depois de selecionado. Pressione Esc para limpar a seleção.',
-  'node.a11yDescription.keyboardDisabled': 'Os blocos não podem ser movidos pelo teclado agora.',
-  'node.a11yDescription.ariaLiveMessage': ({ direction, x, y }: { direction: string; x: number; y: number }) =>
-    `Bloco movido para ${direction === 'up' ? 'cima' : direction === 'down' ? 'baixo' : direction === 'left' ? 'a esquerda' : 'a direita'}. Posição ${Math.round(x)}, ${Math.round(y)}.`,
-  'edge.a11yDescription.default': 'Conexão entre blocos. Pressione Delete para removê-la depois de selecionada.',
-  'controls.ariaLabel': 'Controles de zoom',
-  'controls.zoomIn.ariaLabel': 'Aumentar o zoom',
-  'controls.zoomOut.ariaLabel': 'Diminuir o zoom',
-  'controls.fitView.ariaLabel': 'Enquadrar todos os blocos',
-  'controls.interactive.ariaLabel': 'Alternar interatividade',
-  'minimap.ariaLabel': 'Minimapa da área de trabalho',
-  'handle.ariaLabel': 'Porta de conexão',
-}
+type Painel = null | 'passo' | 'adicionar' | 'teste' | 'verificador' | 'historico'
 
 type Dialogo =
-  | { tipo: 'testar'; id: string }
-  | { tipo: 'executar-dados' }
   | { tipo: 'atalhos' }
-  | { tipo: 'bloco'; editar?: BlockType; baseVersao?: number }
+  | { tipo: 'bloco'; editar?: BlockType; modelo?: BlockType; baseVersao?: number }
   | { tipo: 'sair' }
   | { tipo: 'conflito' }
   | null
@@ -58,62 +39,55 @@ function baixar(nome: string, conteudo: string) {
 
 const dormir = (ms: number) => new Promise((r) => window.setTimeout(r, ms))
 
-function lerPreferencia<T>(chave: string, padrao: T): T {
-  try {
-    const v = localStorage.getItem(chave)
-    return v === null ? padrao : (JSON.parse(v) as T)
-  } catch { return padrao }
-}
-function gravarPreferencia(chave: string, valor: unknown) {
-  try { localStorage.setItem(chave, JSON.stringify(valor)) } catch { /* armazenamento indisponível: ignora */ }
-}
-
 export function EditorPage({ projectId, onSair }: { projectId: string; onSair: () => void }) {
-  return (
-    <ReactFlowProvider>
-      <EditorInterno projectId={projectId} onSair={onSair} />
-    </ReactFlowProvider>
-  )
-}
-
-function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () => void }) {
-  const rf = useReactFlow<BlockNode, FlowEdge>()
   const notificar = useNotificar()
   const [falhaCarga, setFalhaCarga] = useState<ApiFailure | null>(null)
   const [projeto, setProjeto] = useState<Project | null>(null)
   const [nome, setNome] = useState('')
-  const [descricao, setDescricao] = useState('')
-  const [nodes, setNodes, onNodesChange] = useNodesState<BlockNode>([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState<FlowEdge>([])
+  const hist = useHistorico<Flow>()
+  const flowAtual = hist.atual
   const [defs, setDefs] = useState<Map<string, BlockType>>(new Map())
   const [biblioteca, setBiblioteca] = useState<BlockType[]>([])
   const [sistema, setSistema] = useState<SystemInfo | null>(null)
   const [analise, setAnalise] = useState<{ issues: Issue[]; port_types: PortTypes }>({ issues: [], port_types: {} })
+  const [verificando, setVerificando] = useState(false)
   const [salvoJson, setSalvoJson] = useState<string | null>(null)
   const [salvando, setSalvando] = useState(false)
+  const [selecionadoId, setSelecionadoId] = useState<string | null>(null)
+  const [painel, setPainel] = useState<Painel>(null)
+  const [destino, setDestino] = useState<Destino | null>(null)
   const [run, setRun] = useState<Run | null>(null)
   const [executando, setExecutando] = useState(false)
-  const [historico, setHistorico] = useState<Run[]>([])
-  const [aba, setAba] = useState<Aba>('resultado')
-  const [painelAberto, setPainelAberto] = useState(() => lerPreferencia('trama.inferior.aberto', true))
-  const [altura, setAltura] = useState(() => lerPreferencia('trama.inferior.altura', 280))
-  const [mostrarBib, setMostrarBib] = useState(true)
-  const [mostrarConfig, setMostrarConfig] = useState(true)
-  const [modoSelecao, setModoSelecao] = useState(false)
+  const [historicoRuns, setHistoricoRuns] = useState<Run[]>([])
+  const [visao, setVisao] = useState<{ run: Run; flow: Flow } | null>(null)
+  const [iteracoes, setIteracoes] = useState<Record<string, number>>({})
   const [dialogo, setDialogo] = useState<Dialogo>(null)
-  const [viewportInicial, setViewportInicial] = useState<{ x: number; y: number; zoom: number } | null>(null)
-  // O enquadramento automático só vale para projetos que já abrem com blocos. Num projeto vazio ele
-  // reenquadraria a tela ao inserir o primeiro bloco, que então "pularia" do ponto onde foi solto.
-  const [abriuComBlocos, setAbriuComBlocos] = useState(false)
+  const [iniciarTeste, setIniciarTeste] = useState(false)
 
   const vivo = useRef(true)
-  const estado = useRef({ nodes, edges })
-  estado.current = { nodes, edges }
   const contadorValidacao = useRef(0)
-
+  const estado = useRef({ flow: flowAtual, nome, projeto })
+  estado.current = { flow: flowAtual, nome, projeto }
   useEffect(() => () => { vivo.current = false }, [])
-  useEffect(() => gravarPreferencia('trama.inferior.aberto', painelAberto), [painelAberto])
-  useEffect(() => gravarPreferencia('trama.inferior.altura', altura), [altura])
+
+  const flow = visao?.flow ?? flowAtual
+  const somenteLeitura = !!visao
+  const runVisivel = visao ? visao.run : run
+
+  // -------------------------------------------------------------------------- definições dos blocos
+  const defDe = useCallback((p: Passo) => defs.get(chaveDoTipo(p.type, p.version)), [defs])
+
+  const garantirDefs = useCallback(async (f: Flow) => {
+    const faltando = todosOsPassos(f).filter((p) => !defs.has(chaveDoTipo(p.type, p.version)))
+    if (faltando.length === 0) return
+    const achadas = new Map<string, BlockType>()
+    for (const p of faltando) {
+      const k = chaveDoTipo(p.type, p.version)
+      if (achadas.has(k)) continue
+      try { achadas.set(k, await api.versaoDoBloco(p.type, p.version)) } catch { /* bloco indisponível: o cartão avisa */ }
+    }
+    if (achadas.size && vivo.current) setDefs((m) => { const n = new Map(m); achadas.forEach((v, k) => n.set(k, v)); return n })
+  }, [defs])
 
   // -------------------------------------------------------------------------- carga inicial
   useEffect(() => {
@@ -122,31 +96,29 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
       try {
         const [p, blocos, sis] = await Promise.all([api.projeto(projectId), api.blocos(), api.sistema()])
         const mapa = new Map<string, BlockType>(blocos.map((b) => [chaveDoTipo(b.id, b.version), b]))
-        for (const b of p.flow.blocks) {
-          const k = chaveDoTipo(b.type, b.version)
+        for (const passo of todosOsPassos(p.flow)) {
+          const k = chaveDoTipo(passo.type, passo.version)
           if (!mapa.has(k)) {
-            try { mapa.set(k, await api.versaoDoBloco(b.type, b.version)) } catch { /* bloco indisponível: o nó avisa */ }
+            try { mapa.set(k, await api.versaoDoBloco(passo.type, passo.version)) } catch { /* bloco indisponível: o cartão avisa */ }
           }
         }
         if (cancelado) return
-        const { nodes: ns, edges: es } = deFluxo(p.flow, mapa)
-        setProjeto(p); setNome(p.name); setDescricao(p.description)
+        setProjeto(p); setNome(p.name)
         setDefs(mapa); setBiblioteca(blocos); setSistema(sis)
-        setNodes(ns); setEdges(es)
-        setViewportInicial(p.flow.viewport)
-        setAbriuComBlocos(p.flow.blocks.length > 0)
-        setSalvoJson(JSON.stringify(paraFluxo(ns, es)))
-        api.historico(p.id).then((h) => !cancelado && setHistorico(h)).catch(() => undefined)
+        hist.reiniciar(p.flow)
+        setSalvoJson(JSON.stringify(p.flow))
+        api.historico(p.id).then((h) => !cancelado && setHistoricoRuns(h)).catch(() => undefined)
       } catch (e) {
         if (!cancelado) setFalhaCarga(e as ApiFailure)
       }
     })()
     return () => { cancelado = true }
-  }, [projectId, setNodes, setEdges])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId])
 
   // -------------------------------------------------------------------------- derivados
-  const fluxoJson = useMemo(() => JSON.stringify(paraFluxo(nodes, edges)), [nodes, edges])
-  const sujo = salvoJson !== null && (fluxoJson !== salvoJson || nome !== projeto?.name || descricao !== projeto?.description)
+  const fluxoJson = useMemo(() => (flowAtual ? JSON.stringify(flowAtual) : ''), [flowAtual])
+  const sujo = salvoJson !== null && !visao && (fluxoJson !== salvoJson || nome !== projeto?.name)
 
   useEffect(() => {
     const aviso = (e: BeforeUnloadEvent) => { if (sujo) { e.preventDefault(); e.returnValue = '' } }
@@ -154,20 +126,25 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
     return () => window.removeEventListener('beforeunload', aviso)
   }, [sujo])
 
-  // validação contínua (o servidor é a única fonte de verdade das regras)
+  // verificação contínua (o servidor é a única fonte de verdade das regras)
   const revalidar = useCallback(async () => {
+    const f = estado.current.flow
+    if (!f) return
     const minha = ++contadorValidacao.current
+    setVerificando(true)
     try {
-      const r = await api.validar(JSON.parse(JSON.stringify(paraFluxo(estado.current.nodes, estado.current.edges))))
+      const r = await api.validar(f)
       if (vivo.current && minha === contadorValidacao.current) setAnalise({ issues: r.issues, port_types: r.port_types })
-    } catch { /* sem conexão: mantém a última análise */ }
+    } catch { /* sem conexão: mantém a última análise */ } finally {
+      if (vivo.current && minha === contadorValidacao.current) setVerificando(false)
+    }
   }, [])
 
   useEffect(() => {
-    if (salvoJson === null) return
+    if (salvoJson === null || visao) return
     const t = window.setTimeout(revalidar, 350)
     return () => window.clearTimeout(t)
-  }, [fluxoJson, salvoJson, revalidar, sistema?.executor.disponivel])
+  }, [fluxoJson, salvoJson, revalidar, sistema?.executor.disponivel, visao])
 
   const ultimasVersoes = useMemo(() => {
     const m = new Map<string, number>()
@@ -175,182 +152,112 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
     return m
   }, [biblioteca])
 
-  // dados derivados dentro dos nós (estado da execução, problemas, tipos efetivos, versões)
-  useEffect(() => {
-    const passos = new Map(run?.steps.map((s) => [s.block_id, s]))
-    const erros = new Map<string, number>()
-    for (const i of analise.issues) if (i.severity === 'erro' && i.block_id) erros.set(i.block_id, (erros.get(i.block_id) ?? 0) + 1)
-    setNodes((ns) => ns.map((n) => {
-      const def = defs.get(chaveDoTipo(n.data.block.type, n.data.block.version)) ?? null
-      const step = passos.get(n.id) ?? null
-      const problemCount = erros.get(n.id) ?? 0
-      const portTypes = analise.port_types[n.id]
-      const latestVersion = def?.kind === 'python' ? ultimasVersoes.get(def.id) ?? null : null
-      if (n.data.step === step && n.data.problemCount === problemCount && n.data.def === def
-        && JSON.stringify(n.data.portTypes) === JSON.stringify(portTypes) && n.data.latestVersion === latestVersion) return n
-      return {
-        ...n,
-        ariaLabel: descricaoDoNo(n.data.block.label || def?.name || n.data.block.type, step?.state, problemCount),
-        data: { ...n.data, step, def, problemCount, portTypes, latestVersion },
-      }
-    }))
-  }, [run, analise, defs, ultimasVersoes, setNodes])
-
-  useEffect(() => {
-    const passos = new Map(run?.steps.map((s) => [s.block_id, s]))
-    setEdges((es) => es.map((e) => {
-      const tipo = analise.port_types[e.source]?.outputs[e.sourceHandle ?? ''] ?? 'qualquer'
-      const origem = passos.get(e.source)
-      const destino = passos.get(e.target)
-      const ignorado = origem?.state === 'ignorado' || destino?.state === 'ignorado'
-        || (origem?.state === 'concluido' && origem.outputs !== null && e.sourceHandle != null && !(e.sourceHandle in origem.outputs))
-      const className = `fio fio-${tipo}${ignorado ? ' fio-ignorado' : ''}`
-      const animated = destino?.state === 'executando'
-      if (e.className === className && e.animated === animated) return e
-      return { ...e, className, animated, markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: '#4A5263' } }
-    }))
-  }, [analise.port_types, run, setEdges])
-
-  const selecionados = useMemo(() => nodes.filter((n) => n.selected), [nodes])
-  const problemasDeErro = useMemo(() => analise.issues.filter((i) => i.severity === 'erro'), [analise.issues])
-  const nomes = useMemo(
-    () => Object.fromEntries(nodes.map((n) => [n.id, n.data.block.label || n.data.def?.name || n.data.block.type])),
-    [nodes],
-  )
+  const erros = useMemo(() => analise.issues.filter((i) => i.severity === 'erro'), [analise.issues])
   const executorOk = sistema?.executor.disponivel ?? false
+  const nomeDoId = useCallback((id: string) => {
+    const p = flow ? acharQualquer(flow, id) : null
+    return p ? nomeDoPasso(p, defDe(p)) : id
+  }, [flow, defDe])
+
+  const camposDoGatilho = useMemo(() => {
+    if (!flowAtual) return []
+    const d = defDe(flowAtual.trigger)
+    return d ? definicaoEfetiva(d, flowAtual.trigger.params).outputs : []
+  }, [flowAtual, defDe])
 
   // -------------------------------------------------------------------------- edição do fluxo
-  const adicionar = useCallback((def: BlockType, posicao?: { x: number; y: number }) => {
-    let pos = posicao
-    if (!pos) {
-      const caixa = document.getElementById('area-trabalho')?.getBoundingClientRect()
-      const centro = caixa
-        ? rf.screenToFlowPosition({ x: caixa.left + caixa.width / 2, y: caixa.top + caixa.height / 2 })
-        : { x: 0, y: 0 }
-      const desloc = (estado.current.nodes.length % 6) * 28
-      pos = { x: centro.x - 110 + desloc, y: centro.y - 60 + desloc }
-    }
-    const id = aleatorio('blk')
-    const novo: BlockNode = {
-      id, type: 'block', position: { x: Math.round(pos.x / 16) * 16, y: Math.round(pos.y / 16) * 16 }, selected: true,
-      data: { block: { id, type: def.id, version: def.version, params: paramsIniciais(def), label: null }, def, problemCount: 0 },
-    }
-    setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), novo])
+  const aplicar: Aplicar = useCallback((fn, coalescer) => hist.definir(fn, coalescer), [hist])
+
+  function abrirSeletor(d: Destino) {
+    if (!flow) return
+    setDestino(d)
+    setPainel('adicionar')
+  }
+
+  function escolherBloco(def: BlockType) {
+    if (!destino) return
+    const novo = novoPasso(def)
+    hist.definir((f) => inserir(f, destino, novo))
     setDefs((m) => (m.has(chaveDoTipo(def.id, def.version)) ? m : new Map(m).set(chaveDoTipo(def.id, def.version), def)))
-    notificar.anunciar(`Bloco ${def.name} adicionado à área de trabalho.`)
-  }, [rf, setNodes, notificar])
-
-  function aoSoltar(e: React.DragEvent) {
-    const bruto = e.dataTransfer.getData(MIME_BLOCO)
-    if (!bruto) return
-    e.preventDefault()
-    const { id, version } = JSON.parse(bruto) as { id: string; version: number }
-    const def = biblioteca.find((b) => b.id === id && b.version === version)
-    if (def) adicionar(def, rf.screenToFlowPosition({ x: e.clientX, y: e.clientY }))
+    setSelecionadoId(novo.id)
+    setPainel('passo')
+    setDestino(null)
+    notificar.anunciar(`Passo ${def.name} adicionado.`)
   }
 
-  const conectar = useCallback(async (origem: { block: string; port: string }, destino: { block: string; port: string }) => {
-    const { nodes: ns, edges: es } = estado.current
-    const substituidas = es.filter((e) => e.target === destino.block && e.targetHandle === destino.port)
-    const restantes = es.filter((e) => !substituidas.includes(e))
-    const candidata = conexaoDe({ source: origem.block, sourceHandle: origem.port, target: destino.block, targetHandle: destino.port })
-    try {
-      const r = await api.validarConexao(paraFluxo(ns, restantes), candidata)
-      if (!r.ok) {
-        const i = r.issues[0]
-        notificar.erro('Esta conexão não é permitida', `${i.message}${i.hint ? ' ' + i.hint : ''}`)
-        return
-      }
-    } catch (e) {
-      notificar.erro('Não foi possível validar a conexão', (e as ApiFailure).message)
-      return
+  function acao(id: string, a: AcaoDoPasso) {
+    if (!flowAtual) return
+    const nomePasso = nomeDoId(id)
+    if (a === 'duplicar') {
+      const r = duplicar(flowAtual, id)
+      hist.definir(r.flow)
+      if (r.novoId) { setSelecionadoId(r.novoId); setPainel('passo') }
+      notificar.anunciar(`Passo ${nomePasso} duplicado.`)
+    } else if (a === 'excluir') {
+      const usado = usaOPasso(flowAtual, id)
+      hist.definir((f) => remover(f, id))
+      if (selecionadoId === id || (selecionadoId && !achar(remover(flowAtual, id), selecionadoId))) { setSelecionadoId(null); setPainel((p) => (p === 'passo' ? null : p)) }
+      notificar.info(`Passo “${nomePasso}” excluído`, usado ? 'Outros passos usavam o conteúdo dele: veja o verificador de fluxo. Ctrl+Z desfaz.' : 'Ctrl+Z desfaz.')
+    } else {
+      hist.definir((f) => mover(f, id, a === 'subir' ? -1 : 1))
+      notificar.anunciar(`Passo ${nomePasso} movido ${a === 'subir' ? 'para cima' : 'para baixo'}.`)
     }
-    setEdges((atuais) => [
-      ...atuais.filter((e) => !(e.target === destino.block && e.targetHandle === destino.port)),
-      { id: candidata.id, source: origem.block, sourceHandle: origem.port, target: destino.block, targetHandle: destino.port, data: {} },
-    ])
-    notificar.anunciar(`Conectado: ${nomes[origem.block] ?? 'bloco'} para ${nomes[destino.block] ?? 'bloco'}.`)
-  }, [nomes, notificar, setEdges])
-
-  function alterarParam(id: string, paramId: string, valor: unknown) {
-    setNodes((ns) => ns.map((n) => {
-      if (n.id !== id || !n.data.def) return n
-      const params = { ...n.data.block.params, [paramId]: valor }
-      for (const p of n.data.def.params) {
-        // ex.: ao trocar o "tipo" da constante, o valor volta ao padrão do novo tipo
-        if (p.type_from?.param === paramId) params[p.id] = valorPadraoDoTipo(String(valor))
-      }
-      return { ...n, data: { ...n.data, block: { ...n.data.block, params } } }
-    }))
   }
 
-  function alterarRotulo(id: string, rotulo: string) {
-    setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, block: { ...n.data.block, label: rotulo || null } } } : n)))
+  function selecionar(id: string) {
+    setSelecionadoId(id)
+    setPainel('passo')
+    setDestino(null)
   }
 
-  function duplicarSelecionados() {
-    const ids = new Set(estado.current.nodes.filter((n) => n.selected).map((n) => n.id))
-    if (ids.size === 0) return
-    const r = duplicar(estado.current.nodes, estado.current.edges, ids)
-    setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), ...r.nodes])
-    setEdges((es) => [...es, ...r.edges])
-    notificar.anunciar(`${r.nodes.length} ${r.nodes.length === 1 ? 'bloco duplicado' : 'blocos duplicados'}.`)
-  }
+  const irParaPasso = useCallback((id: string) => {
+    setSelecionadoId(id)
+    setPainel('passo')
+    window.requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-passo="${id}"]`)
+      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      el?.querySelector<HTMLElement>('.cartao-principal')?.focus()
+    })
+  }, [])
 
-  function excluirSelecionados() {
-    const ns = estado.current.nodes.filter((n) => n.selected)
-    if (ns.length === 0) return
-    rf.deleteElements({ nodes: ns.map((n) => ({ id: n.id })) })
-    notificar.anunciar(`${ns.length} ${ns.length === 1 ? 'bloco excluído' : 'blocos excluídos'}.`)
+  function atualizarVersao(p: Passo) {
+    const ultima = ultimasVersoes.get(p.type)
+    const nova = ultima ? defs.get(chaveDoTipo(p.type, ultima)) : undefined
+    if (!ultima || !nova) return
+    hist.definir((f) => ({ ...f, steps: JSON.parse(JSON.stringify(f.steps), (k, v) => (v && typeof v === 'object' && v.id === p.id && v.type === p.type ? { ...v, version: ultima } : v)) }))
+    notificar.info('Bloco atualizado', 'Confira o verificador de fluxo: se os campos mudaram, algum passo pode precisar de ajuste.')
   }
-
-  function atualizarVersao(id: string) {
-    setNodes((ns) => ns.map((n) => {
-      const ultima = n.data.def ? ultimasVersoes.get(n.data.def.id) : undefined
-      const nova = ultima ? defs.get(chaveDoTipo(n.data.def!.id, ultima)) : undefined
-      if (n.id !== id || !nova) return n
-      return { ...n, data: { ...n.data, def: nova, block: { ...n.data.block, version: nova.version } } }
-    }))
-    notificar.info('Bloco atualizado', 'Confira a aba “Problemas”: se as portas mudaram, algumas conexões podem precisar de ajuste.')
-  }
-
-  const irParaBloco = useCallback((id: string) => {
-    setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })))
-    rf.fitView({ nodes: [{ id }], duration: 300, maxZoom: 1.1 })
-    window.requestAnimationFrame(() => document.querySelector<HTMLElement>(`.react-flow__node[data-id="${id}"]`)?.focus())
-  }, [rf, setNodes])
 
   // -------------------------------------------------------------------------- salvar / exportar
   const salvar = useCallback(async (): Promise<boolean> => {
-    if (!projeto || salvando) return false
+    const { flow: f, nome: n, projeto: p } = estado.current
+    if (!p || !f || salvando || visao) return false
     setSalvando(true)
-    const { nodes: ns, edges: es } = estado.current
     try {
-      const p = await api.salvarProjeto(projeto.id, {
-        name: nome.trim() || projeto.name, description: descricao,
-        flow: paraFluxo(ns, es, rf.getViewport()), base_revision: projeto.revision,
-      })
-      setProjeto(p)
-      setNome(p.name)
-      setSalvoJson(JSON.stringify(paraFluxo(ns, es)))
-      notificar.sucesso('Projeto salvo')
+      const salvo = await api.salvarProjeto(p.id, { name: n.trim() || p.name, flow: f, base_revision: p.revision })
+      setProjeto(salvo)
+      setNome(salvo.name)
+      setSalvoJson(JSON.stringify(f))
+      notificar.sucesso('Fluxo salvo')
+      void revalidar()
       return true
     } catch (e) {
-      const f = e as ApiFailure
-      if (f.code === 'conflito_de_revisao') setDialogo({ tipo: 'conflito' })
+      const x = e as ApiFailure
+      if (x.code === 'conflito_de_revisao') setDialogo({ tipo: 'conflito' })
       else {
-        notificar.erro('Não foi possível salvar', `${f.message} ${f.issues[0]?.message ?? ''}`.trim())
-        if (f.issues.length) { setAnalise((a) => ({ ...a, issues: f.issues })); setAba('problemas'); setPainelAberto(true) }
+        notificar.erro('Não foi possível salvar', `${x.message} ${x.issues[0]?.message ?? ''}`.trim())
+        if (x.issues.length) { setAnalise((a) => ({ ...a, issues: x.issues })); setPainel('verificador') }
       }
       return false
     } finally {
       setSalvando(false)
     }
-  }, [projeto, salvando, nome, descricao, rf, notificar])
+  }, [salvando, visao, notificar, revalidar])
 
   async function exportar() {
+    if (!flow) return
     try {
-      const dados = await api.exportarFluxo(nome, descricao, paraFluxo(estado.current.nodes, estado.current.edges, rf.getViewport()))
+      const dados = await api.exportarFluxo(nome, projeto?.description ?? '', flow)
       baixar(`${slugDeId(nome) || 'fluxo'}.trama.json`, JSON.stringify(dados, null, 2))
       notificar.sucesso('Fluxo exportado', 'O arquivo inclui os blocos Python usados, nas versões fixadas.')
     } catch (e) {
@@ -366,56 +273,78 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
         const r = await api.execucao(id)
         setRun(r)
         const atual = r.steps.find((s) => s.state === 'executando')
-        if (atual && atual.block_id !== anterior) {
-          anterior = atual.block_id
-          notificar.anunciar(`Executando ${estado.current.nodes.find((n) => n.id === atual.block_id)?.data.block.label
-            || estado.current.nodes.find((n) => n.id === atual.block_id)?.data.def?.name || 'bloco'}.`)
+        if (atual && atual.step_id !== anterior) {
+          anterior = atual.step_id
+          const p = estado.current.flow ? acharQualquer(estado.current.flow, atual.step_id) : null
+          notificar.anunciar(`Executando ${p ? nomeDoPasso(p, undefined) : 'passo'}.`)
         }
-        if (r.state === 'concluido' || r.state === 'falhou') {
-          notificar.anunciar(r.state === 'concluido'
-            ? `Execução concluída em ${r.duration_ms} milissegundos.`
-            : `A execução falhou no bloco ${r.error?.block_name ?? ''}: ${r.error?.message ?? ''}`)
+        if (['concluido', 'falhou', 'cancelado'].includes(r.state)) {
+          notificar.anunciar(r.state === 'concluido' ? `Teste concluído em ${r.duration_ms} milissegundos.`
+            : r.state === 'cancelado' ? 'A execução foi cancelada.' : `O teste falhou no passo ${r.error?.step_name ?? ''}: ${r.error?.message ?? ''}`)
           break
         }
         await dormir(300)
       }
     } catch (e) {
-      notificar.erro('Perdemos o contato com o servidor durante a execução', (e as ApiFailure).message)
+      notificar.erro('Perdemos o contato com o servidor durante o teste', (e as ApiFailure).message)
     } finally {
       if (vivo.current) {
         setExecutando(false)
-        api.historico(projectId).then((h) => vivo.current && setHistorico(h)).catch(() => undefined)
+        api.historico(projectId).then((h) => vivo.current && setHistoricoRuns(h)).catch(() => undefined)
       }
     }
   }, [notificar, projectId])
 
-  const executar = useCallback(async (dados?: Record<string, Record<string, unknown>>) => {
-    if (!projeto || executando) return
-    if (estado.current.nodes.length === 0) {
-      notificar.info('O fluxo está vazio', 'Adicione blocos da biblioteca antes de executar.')
+  const testar = useCallback(async (dados?: Record<string, unknown>) => {
+    const { flow: f, projeto: p } = estado.current
+    if (!p || !f || executando) return
+    if (f.steps.length === 0) {
+      notificar.info('O fluxo está vazio', 'Adicione ao menos um passo antes de testar.')
       return
     }
-    setExecutando(true); setRun(null); setPainelAberto(true); setAba('resultado')
+    setExecutando(true); setRun(null); setVisao(null); setIteracoes({})
     try {
-      const r = await api.executar(projeto.id, paraFluxo(estado.current.nodes, estado.current.edges), dados)
+      const r = await api.executar(p.id, f, dados)
       setRun(r)
-      notificar.anunciar('Execução iniciada.')
+      notificar.anunciar('Teste iniciado.')
       void acompanhar(r.id)
     } catch (e) {
-      const f = e as ApiFailure
+      const x = e as ApiFailure
       setExecutando(false)
-      if (f.issues.length) {
+      if (x.issues.length && x.code === 'fluxo_invalido') {
         await revalidar()
-        setAba('problemas')
-        notificar.erro('O fluxo não foi executado', `${f.issues.length} ${f.issues.length === 1 ? 'problema precisa' : 'problemas precisam'} ser corrigido(s). Veja a aba “Problemas”.`)
-      } else {
-        notificar.erro('Não foi possível executar', f.message)
-      }
+        setPainel('verificador')
+        notificar.erro('O fluxo não foi testado', `${x.issues.length} ${x.issues.length === 1 ? 'problema precisa' : 'problemas precisam'} ser corrigido(s). Veja o verificador de fluxo.`)
+      } else notificar.erro('Não foi possível testar', [x.message, x.issues[0]?.message].filter(Boolean).join(' '))
     }
-  }, [projeto, executando, acompanhar, revalidar, notificar])
+  }, [executando, acompanhar, revalidar, notificar])
 
-  async function abrirExecucao(id: string) {
-    try { setRun(await api.execucao(id)); setAba('resultado') } catch (e) { notificar.erro('Não foi possível abrir a execução', (e as ApiFailure).message) }
+  function abrirTeste(iniciar = false) {
+    setIniciarTeste(iniciar)
+    setPainel('teste')
+    setSelecionadoId(null)
+  }
+
+  async function cancelarExecucao() {
+    if (!run) return
+    try { await api.cancelarExecucao(run.id) } catch (e) { notificar.erro('Não foi possível cancelar', (e as ApiFailure).message) }
+  }
+
+  async function abrirExecucao(r: Run) {
+    try {
+      const completa = await api.execucaoComFluxo(r.id)
+      await garantirDefs(completa.flow)
+      setVisao({ run: completa, flow: completa.flow })
+      setIteracoes({})
+      setSelecionadoId(null)
+      setPainel('historico')
+    } catch (e) { notificar.erro('Não foi possível abrir a execução', (e as ApiFailure).message) }
+  }
+
+  function reenviar(r: Run) {
+    setVisao(null)
+    abrirTeste(false)
+    void testar(r.trigger_inputs)
   }
 
   // -------------------------------------------------------------------------- teclado
@@ -426,42 +355,21 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
       const emCampo = !!alvo.closest('input, textarea, select, [contenteditable="true"], .cm-editor')
       const ctrl = e.ctrlKey || e.metaKey
       if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); void salvar(); return }
-      if (ctrl && e.key === 'Enter') { e.preventDefault(); void executar(); return }
+      if (ctrl && e.key === 'Enter') { e.preventDefault(); abrirTeste(true); return }
       if (emCampo) return
-      if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicarSelecionados(); return }
-      if (ctrl && e.key.toLowerCase() === 'a' && alvo.closest('.react-flow')) {
-        e.preventDefault()
-        setNodes((ns) => ns.map((n) => ({ ...n, selected: true })))
-        return
-      }
-      if (e.key === '/' && !ctrl) { e.preventDefault(); document.getElementById('busca-blocos')?.focus(); return }
+      if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); hist.desfazer(); return }
+      if (ctrl && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); hist.refazer(); return }
       if (e.key === 'Escape') {
-        setNodes((ns) => (ns.some((n) => n.selected) ? ns.map((n) => ({ ...n, selected: false })) : ns))
+        setDestino(null)
+        setPainel((p) => (p === 'adicionar' || p === 'passo' ? null : p))
       }
     }
     window.addEventListener('keydown', aoTeclar)
     return () => window.removeEventListener('keydown', aoTeclar)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salvar, executar])
+  }, [salvar, hist.desfazer, hist.refazer])
 
-  // -------------------------------------------------------------------------- ações do painel
-  const acoes: AcoesConfig = {
-    onParam: alterarParam,
-    onRotulo: alterarRotulo,
-    onConectar: (o, d) => void conectar(o, d),
-    onDesconectar: (d) => setEdges((es) => es.filter((e) => !(e.target === d.block && e.targetHandle === d.port))),
-    onTestar: (id) => setDialogo({ tipo: 'testar', id }),
-    onDuplicar: duplicarSelecionados,
-    onExcluir: excluirSelecionados,
-    onAtualizarVersao: atualizarVersao,
-    onEditarBloco: (id) => {
-      const n = estado.current.nodes.find((x) => x.id === id)
-      if (n?.data.def) setDialogo({ tipo: 'bloco', editar: n.data.def, baseVersao: n.data.def.version })
-    },
-    onVerDetalhes: () => { setAba('erros'); setPainelAberto(true) },
-    onIrParaBloco: irParaBloco,
-  }
-
+  // -------------------------------------------------------------------------- blocos Python reutilizáveis
   async function aposSalvarBloco(b: BlockType, avisos: string[]) {
     try {
       const lista = await api.blocos()
@@ -474,130 +382,145 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
       })
     } catch { /* a biblioteca se atualiza na próxima carga */ }
     notificar.sucesso(`Bloco “${b.name}” salvo na biblioteca (v${b.version})`,
-      avisos[0] ?? 'Arraste-o para o fluxo. Fluxos que já usam uma versão anterior continuam nela.')
+      avisos[0] ?? 'Use-o em qualquer fluxo pelo seletor de passos. Fluxos que usam uma versão anterior continuam nela.')
   }
 
+  function blocoDoPasso(p: Passo): BlockType | undefined {
+    const d = defDe(p)
+    if (!d) return undefined
+    const ef = definicaoEfetiva(d, p.params)
+    return { ...d, id: 'custom.novo', name: p.label || 'Meu bloco Python', description: '', category: 'Personalizados', kind: 'python', code: String(p.params.codigo ?? d.params.find((x) => x.id === 'codigo')?.default ?? ''), inputs: ef.inputs, outputs: ef.outputs, params: [] }
+  }
+
+  // -------------------------------------------------------------------------- telas de apoio
   if (falhaCarga) {
     return (
       <div className="tela-cheia-centro">
-        <Aviso tipo="erro" titulo={falhaCarga.status === 404 ? 'Projeto não encontrado' : 'Não foi possível abrir o projeto'}>
+        <Aviso tipo="erro" titulo={falhaCarga.status === 404 ? 'Fluxo não encontrado' : 'Não foi possível abrir o fluxo'}>
           {falhaCarga.message}
-          <div className="acoes-linha"><button className="btn btn-primario" onClick={onSair}>Voltar aos projetos</button></div>
+          <div className="acoes-linha"><button className="btn btn-primario" onClick={onSair}>Voltar aos fluxos</button></div>
         </Aviso>
       </div>
     )
   }
-  if (!projeto) return <div className="tela-cheia-centro"><p role="status">Abrindo o projeto…</p></div>
+  if (!projeto || !flow || !flowAtual) return <div className="tela-cheia-centro"><p role="status">Abrindo o fluxo…</p></div>
 
-  const noTeste = dialogo?.tipo === 'testar' ? nodes.find((n) => n.id === dialogo.id) : undefined
-  const inicios = nodes.filter((n) => n.data.block.type === 'builtin.inicio')
+  const selecionado = selecionadoId ? acharQualquer(flow, selecionadoId) : null
+  const posSelecionado = selecionado && selecionado.id !== flow.trigger.id ? achar(flow, selecionado.id) : null
+  const ctxSelecionado = selecionado ? contextoDoPasso(flow, selecionado.id, runVisivel, iteracoes) : []
+  const linhaSelecionada = selecionado ? linhaDoPasso(runVisivel, selecionado.id, ctxSelecionado) : null
+  const nomeDestino = destino
+    ? (destino.paiId ? `Dentro de “${nomeDoId(destino.paiId)}”${destino.espaco ? ` (${defDe(acharQualquer(flow, destino.paiId)!)?.slots.find((s) => s.id === destino.espaco)?.label ?? destino.espaco})` : ''}`
+      : destino.indice === 0 ? 'Logo depois do gatilho' : `Depois de “${nomeDoId(flow.steps[destino.indice - 1].id)}”`)
+    : ''
+  const painelAtual: Painel = visao && painel === 'passo' && !selecionado ? 'historico' : painel
 
   return (
     <div className="editor">
-      <a className="pular-link" href="#area-trabalho">Ir para a área de trabalho</a>
+      <a className="pular-link" href="#area-trabalho">Ir para o fluxo</a>
       <header className="barra" role="banner">
         <button className="btn btn-fantasma" onClick={() => (sujo ? setDialogo({ tipo: 'sair' }) : onSair())}>
-          <Icon name="home" size={16} /> Projetos
+          <Icon name="home" size={16} /> Meus fluxos
         </button>
         <span className="barra-marca"><Logo size={26} /><span className="marca-nome">Trama</span></span>
-        <input className="nome-projeto" aria-label="Nome do projeto" value={nome} maxLength={120} onChange={(e) => setNome(e.target.value)} />
+        <input className="nome-projeto" aria-label="Nome do fluxo" value={nome} maxLength={120} disabled={somenteLeitura} onChange={(e) => setNome(e.target.value)} />
         <span className={`status-salvo ${sujo ? 'sujo' : ''}`} role="status">
-          <Icon name={sujo ? 'edit' : 'check'} size={14} /> {salvando ? 'Salvando…' : sujo ? 'Alterações não salvas' : 'Tudo salvo'}
+          <Icon name={sujo ? 'edit' : 'check'} size={14} /> {somenteLeitura ? 'Somente leitura' : salvando ? 'Salvando…' : sujo ? 'Alterações não salvas' : 'Tudo salvo'}
         </span>
         <div className="barra-acoes">
-          <button className="btn-icone" aria-pressed={mostrarBib} aria-label="Mostrar ou ocultar a biblioteca de blocos" title="Biblioteca"
-            onClick={() => setMostrarBib((v) => !v)}><Icon name="panelLeft" /></button>
-          <button className="btn-icone" aria-pressed={mostrarConfig} aria-label="Mostrar ou ocultar o painel de configuração" title="Configuração"
-            onClick={() => setMostrarConfig((v) => !v)}><Icon name="panelRight" /></button>
-          <button className="btn-icone" aria-label="Ver atalhos de teclado" title="Atalhos de teclado" onClick={() => setDialogo({ tipo: 'atalhos' })}><Icon name="keyboard" /></button>
-          <button className="btn" onClick={exportar} title="Baixar o fluxo como arquivo JSON"><Icon name="download" size={16} /> Exportar</button>
-          <button className="btn" onClick={() => void salvar()} disabled={salvando || !sujo} title="Salvar (Ctrl+S)"><Icon name="save" size={16} /> Salvar</button>
-          <button className="btn" onClick={() => setDialogo({ tipo: 'executar-dados' })} disabled={executando} title="Informar os dados desta execução">Executar com dados…</button>
-          <button className="btn btn-primario" onClick={() => void executar()} disabled={executando} title="Executar o fluxo (Ctrl+Enter)">
-            <Icon name="play" size={16} /> {executando ? 'Executando…' : 'Executar'}
+          <button className="btn-icone" aria-label="Desfazer (Ctrl+Z)" title="Desfazer (Ctrl+Z)" disabled={!hist.podeDesfazer || somenteLeitura} onClick={hist.desfazer}><Icon name="undo" /></button>
+          <button className="btn-icone" aria-label="Refazer (Ctrl+Y)" title="Refazer (Ctrl+Y)" disabled={!hist.podeRefazer || somenteLeitura} onClick={hist.refazer}><Icon name="redo" /></button>
+          <button className={`btn ${painelAtual === 'verificador' ? 'btn-ativo' : ''}`} aria-pressed={painelAtual === 'verificador'} disabled={somenteLeitura}
+            onClick={() => setPainel((p) => (p === 'verificador' ? null : 'verificador'))} title="Verificador de fluxo">
+            <Icon name="checker" size={16} /> Verificador
+            {erros.length > 0 && <span className="ponto-vermelho" aria-label={`${erros.length} ${erros.length === 1 ? 'erro' : 'erros'}`}>{erros.length}</span>}
           </button>
+          <button className={`btn ${painelAtual === 'historico' ? 'btn-ativo' : ''}`} aria-pressed={painelAtual === 'historico'}
+            onClick={() => setPainel((p) => (p === 'historico' ? null : 'historico'))} title="Histórico de execuções">
+            <Icon name="history" size={16} /> Histórico
+          </button>
+          <button className="btn" onClick={() => void exportar()} title="Baixar o fluxo como arquivo JSON"><Icon name="download" size={16} /> Exportar</button>
+          <button className="btn" onClick={() => void salvar()} disabled={salvando || !sujo} title="Salvar (Ctrl+S)"><Icon name="save" size={16} /> Salvar</button>
+          <button className="btn btn-primario" onClick={() => abrirTeste(false)} title="Testar o fluxo (Ctrl+Enter)">
+            <Icon name="play" size={16} /> {executando ? 'Testando…' : 'Testar'}
+          </button>
+          <button className="btn-icone" aria-label="Ver atalhos de teclado" title="Atalhos de teclado" onClick={() => setDialogo({ tipo: 'atalhos' })}><Icon name="keyboard" /></button>
         </div>
       </header>
 
       {sistema && !sistema.executor.disponivel && (
         <div className="banner-executor">
-          <Aviso tipo="aviso" titulo="Código Python personalizado está desabilitado">
+          <Aviso tipo="aviso" titulo="Código Python está desabilitado">
             {sistema.executor.mensagem} {sistema.executor.instrucao} Os demais blocos continuam funcionando.
           </Aviso>
         </div>
       )}
+      {visao && (
+        <div className="banner-visao" role="status">
+          <Icon name="history" size={16} />
+          <span>Você está vendo uma execução antiga, com o fluxo como ele era naquele momento. Nada aqui pode ser alterado.</span>
+          <button className="btn btn-pequeno" onClick={() => { setVisao(null); setIteracoes({}) }}>Voltar ao fluxo atual</button>
+        </div>
+      )}
 
-      <div className={`editor-corpo ${mostrarBib ? '' : 'sem-bib'} ${mostrarConfig ? '' : 'sem-config'}`}>
-        {mostrarBib && (
-          <Library blocos={biblioteca} executorOk={executorOk} onAdicionar={(b) => adicionar(b)}
-            onNovoBlocoPython={() => setDialogo({ tipo: 'bloco' })}
-            onEditarBloco={(b) => setDialogo({ tipo: 'bloco', editar: b, baseVersao: b.version })} />
-        )}
-        <main id="area-trabalho" className="area-trabalho" aria-label="Área de trabalho" tabIndex={-1}>
-          <ReactFlow<BlockNode, FlowEdge>
-            nodes={nodes} edges={edges} nodeTypes={TIPOS_DE_NO}
-            onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
-            onConnect={(c) => void conectar({ block: c.source, port: c.sourceHandle ?? '' }, { block: c.target, port: c.targetHandle ?? '' })}
-            isValidConnection={(c) => c.source !== c.target}
-            onDrop={aoSoltar} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
-            defaultViewport={viewportInicial ?? (abriuComBlocos ? undefined : { x: 40, y: 40, zoom: 1 })}
-            fitView={!viewportInicial && abriuComBlocos} fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
-            minZoom={0.2} maxZoom={2} snapToGrid snapGrid={[16, 16]}
-            deleteKeyCode={['Delete', 'Backspace']} multiSelectionKeyCode={['Shift', 'Control', 'Meta']}
-            selectionOnDrag={modoSelecao} panOnDrag={modoSelecao ? [1, 2] : true} selectionMode={SelectionMode.Partial}
-            ariaLabelConfig={ROTULOS_RF} connectionRadius={28}
-            defaultEdgeOptions={{ markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: '#4A5263' } }}
-          >
-            <Background variant={BackgroundVariant.Lines} gap={32} lineWidth={1} color="#E4DAC5" />
-            <Panel position="top-left" className="ferramentas-canvas">
-              <div role="toolbar" aria-label="Ferramentas da área de trabalho">
-                <button className="btn-icone" onClick={() => rf.zoomIn({ duration: 150 })} aria-label="Aumentar o zoom" title="Aumentar o zoom"><Icon name="zoomIn" /></button>
-                <button className="btn-icone" onClick={() => rf.zoomOut({ duration: 150 })} aria-label="Diminuir o zoom" title="Diminuir o zoom"><Icon name="zoomOut" /></button>
-                <button className="btn-icone" onClick={() => rf.fitView({ duration: 250, padding: 0.12, maxZoom: 1 })} aria-label="Enquadrar todos os blocos" title="Enquadrar todos os blocos"><Icon name="fit" /></button>
-                <button className="btn-icone" aria-pressed={modoSelecao} onClick={() => setModoSelecao((v) => !v)}
-                  aria-label="Modo de seleção por retângulo" title="Modo de seleção: arrastar o fundo seleciona vários blocos"><Icon name="pick" /></button>
-              </div>
-            </Panel>
-            {nodes.length === 0 && (
-              <Panel position="top-center" className="vazio-canvas">
-                <Icon name="plus" size={26} />
-                <p><strong>Comece arrastando um bloco</strong> da biblioteca para cá.</p>
-                <p className="campo-ajuda">Dica: um fluxo costuma começar em “Início manual” ou “Valor constante” e terminar em “Saída final”.</p>
-              </Panel>
-            )}
-            <MiniMap pannable zoomable position="bottom-left" ariaLabel="Minimapa da área de trabalho" style={{ width: 150, height: 96 }}
-              nodeColor={(n) => corDaCategoria((n.data as BlockNode['data']).def?.category ?? 'Personalizados')} maskColor="rgba(30,36,48,0.12)" />
-          </ReactFlow>
+      <div className="editor-corpo">
+        <main id="area-trabalho" className="area-trabalho" aria-label="Fluxo" tabIndex={-1}
+          onClick={(e) => { if (e.target === e.currentTarget) { setSelecionadoId(null); setPainel((p) => (p === 'passo' ? null : p)) } }}>
+          <ErrorBoundary titulo="Não foi possível desenhar o fluxo" resetKey={fluxoJson}>
+            <Designer
+              flow={flow} defDe={defDe} selecionadoId={selecionadoId} destinoAtivo={painelAtual === 'adicionar' ? destino : null}
+              onSelecionar={selecionar} onAdicionar={abrirSeletor} onAcao={acao} problemas={somenteLeitura ? [] : analise.issues}
+              run={runVisivel} somenteLeitura={somenteLeitura} iteracoes={iteracoes}
+              onIteracao={(k, n) => setIteracoes((m) => ({ ...m, [k]: n }))}
+            />
+          </ErrorBoundary>
         </main>
-        {mostrarConfig && (
-          <ConfigPanel
-            selecionados={selecionados} todos={nodes} arestas={edges} problemas={analise.issues} sistema={sistema} acoes={acoes}
-            nomeProjeto={nome} descricaoProjeto={descricao} onNomeProjeto={setNome} onDescricaoProjeto={setDescricao}
-          />
-        )}
+
+        <ErrorBoundary titulo="Não foi possível exibir este painel" resetKey={`${painelAtual}-${selecionadoId}`}>
+          {painelAtual === 'adicionar' && destino && (
+            <SeletorDeBloco
+              blocos={biblioteca} executorOk={executorOk} contexto={nomeDestino}
+              profundidadeMaxima={profundidadeDoDestino(flow, destino) >= MAX_PROFUNDIDADE}
+              onEscolher={escolherBloco} onFechar={() => { setPainel(null); setDestino(null) }}
+              onNovoBlocoPython={() => setDialogo({ tipo: 'bloco' })}
+              onEditarBloco={(b) => setDialogo({ tipo: 'bloco', editar: b, baseVersao: b.version })}
+            />
+          )}
+          {painelAtual === 'passo' && selecionado && (
+            <PainelPasso
+              passo={selecionado} def={defDe(selecionado)} flow={flow} defDe={defDe} portTypes={somenteLeitura ? {} : analise.port_types}
+              problemas={somenteLeitura ? [] : analise.issues} linha={linhaSelecionada}
+              iteracaoTexto={ctxSelecionado.length ? `Repetição ${ctxSelecionado.map((n) => n + 1).join('.')}` : ''}
+              somenteLeitura={somenteLeitura} indice={posSelecionado?.indice ?? 0} sistema={sistema}
+              ultimaVersao={ultimasVersoes.get(selecionado.type) ?? null} aplicar={aplicar}
+              onFechar={() => { setPainel(null); setSelecionadoId(null) }}
+              onSalvarComoBloco={(p) => setDialogo({ tipo: 'bloco', modelo: blocoDoPasso(p) })}
+              onAtualizarVersao={atualizarVersao}
+              onEditarBloco={(p) => { const d = defDe(p); if (d) setDialogo({ tipo: 'bloco', editar: d, baseVersao: d.version }) }}
+            />
+          )}
+          {painelAtual === 'teste' && (
+            <PainelTeste
+              campos={camposDoGatilho} run={run} executando={executando} historico={historicoRuns}
+              executorMsg={sistema && !sistema.executor.disponivel ? [sistema.executor.mensagem, sistema.executor.instrucao].filter(Boolean).join(' ') : null}
+              onTestar={(d) => void testar(d)} onCancelar={() => void cancelarExecucao()} onFechar={() => setPainel(null)}
+              onVerNoFluxo={irParaPasso} iniciarAoAbrir={iniciarTeste}
+            />
+          )}
+          {painelAtual === 'verificador' && (
+            <Verificador problemas={analise.issues} nomeDe={nomeDoId} onIr={irParaPasso} onFechar={() => setPainel(null)} verificando={verificando} />
+          )}
+          {painelAtual === 'historico' && (
+            <Historico runs={historicoRuns.filter((h) => h.kind === 'fluxo')} abertoId={visao?.run.id ?? null} onAbrir={(r) => void abrirExecucao(r)}
+              onReenviar={reenviar} onFechar={() => setPainel(null)} ocupado={executando} />
+          )}
+        </ErrorBoundary>
       </div>
 
-      <ErrorBoundary titulo="Não foi possível exibir os resultados" resetKey={run?.id}
-        acao={<button className="btn btn-pequeno" onClick={() => setRun(null)}>Limpar resultado</button>}>
-      <BottomPanel
-        aba={aba} onAba={setAba} run={run} executando={executando} nomes={nomes} problemas={analise.issues}
-        historico={historico} onAbrirExecucao={(id) => void abrirExecucao(id)} onIrParaBloco={irParaBloco}
-        aberto={painelAberto} onAlternar={() => setPainelAberto((v) => !v)} altura={altura} onAltura={setAltura}
-        onExecutar={() => void executar()} onLimpar={() => setRun(null)}
-      />
-      </ErrorBoundary>
-
-      {dialogo?.tipo === 'testar' && noTeste?.data.def && (
-        <TestarBlocoDialog no={noTeste} projectId={projeto.id} onClose={() => setDialogo(null)} />
-      )}
-      {dialogo?.tipo === 'executar-dados' && (
-        <ExecutarComDadosDialog inicios={inicios} onClose={() => setDialogo(null)}
-          onExecutar={(d) => { setDialogo(null); void executar(d) }} />
-      )}
       {dialogo?.tipo === 'atalhos' && <AtalhosDialog onClose={() => setDialogo(null)} />}
       {dialogo?.tipo === 'bloco' && (
         <BlockEditorDialog
-          editar={dialogo.editar} baseVersao={dialogo.baseVersao} categorias={[...new Set(biblioteca.map((b) => b.category))]}
+          editar={dialogo.editar} modelo={dialogo.modelo} baseVersao={dialogo.baseVersao} categorias={[...new Set(biblioteca.map((b) => b.category))]}
           executorOk={executorOk} onClose={() => setDialogo(null)}
           onSalvo={(b, avisos) => { setDialogo(null); void aposSalvarBloco(b, avisos) }}
         />
@@ -609,12 +532,12 @@ function EditorInterno({ projectId, onSair }: { projectId: string; onSair: () =>
             <button className="btn btn-perigo" onClick={onSair}>Sair sem salvar</button>
             <button className="btn btn-primario" onClick={async () => { if (await salvar()) onSair() }}>Salvar e sair</button>
           </>}>
-          <p>Há alterações que ainda não foram salvas neste projeto.</p>
+          <p>Há alterações que ainda não foram salvas neste fluxo.</p>
         </Dialog>
       )}
       {dialogo?.tipo === 'conflito' && (
-        <Confirmar titulo="Este projeto mudou em outra aba" rotuloConfirmar="Exportar meu fluxo" perigo={false}
-          mensagem="Outra aba ou janela salvou este projeto depois que você o abriu. Para não perder o seu trabalho, exporte o fluxo atual e depois recarregue a página para ver a versão salva."
+        <Confirmar titulo="Este fluxo mudou em outra aba" rotuloConfirmar="Exportar meu fluxo" perigo={false}
+          mensagem="Outra aba ou janela salvou este fluxo depois que você o abriu. Para não perder o seu trabalho, exporte o fluxo atual e depois recarregue a página para ver a versão salva."
           onConfirmar={() => { void exportar(); setDialogo(null) }} onCancelar={() => setDialogo(null)} />
       )}
     </div>

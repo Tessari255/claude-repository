@@ -48,7 +48,7 @@ class Settings:
     limites: Limites = field(default_factory=Limites)
     hosts_permitidos: tuple[str, ...] = ("localhost", "127.0.0.1", "[::1]", "testserver")
     origens_permitidas: tuple[str, ...] = ()
-    semear_exemplos: bool = True
+    semear_exemplos: bool = False  # os modelos aparecem na tela inicial; só semeia projetos prontos se TRAMA_SEED_EXAMPLES=1
     pasta_frontend: Path = field(default_factory=lambda: RAIZ / "frontend" / "dist")
     pasta_exemplos: Path = field(default_factory=lambda: RAIZ / "examples")
 
@@ -75,5 +75,5 @@ def carregar_settings() -> Settings:
         limites=limites,
         hosts_permitidos=tuple(h.strip() for h in hosts.split(",")) if hosts else Settings().hosts_permitidos,
         origens_permitidas=tuple(o.strip() for o in os.environ.get("TRAMA_ALLOWED_ORIGINS", "").split(",") if o.strip()),
-        semear_exemplos=os.environ.get("TRAMA_SEED_EXAMPLES", "1") != "0",
+        semear_exemplos=os.environ.get("TRAMA_SEED_EXAMPLES", "0") == "1",
     )

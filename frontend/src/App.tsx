@@ -16,7 +16,7 @@ export function App() {
   }, [])
 
   // O título da página acompanha a tela, para leitores de tela e para o histórico do navegador.
-  useEffect(() => { document.title = rota.tipo === 'home' ? 'Projetos — Trama' : 'Editor — Trama' }, [rota])
+  useEffect(() => { document.title = rota.tipo === 'home' ? 'Meus fluxos — Trama' : 'Editor de fluxo — Trama' }, [rota])
 
   if (rota.tipo === 'projeto') {
     return <EditorPage key={rota.id} projectId={rota.id} onSair={() => { window.location.hash = '#/' }} />

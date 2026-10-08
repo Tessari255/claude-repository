@@ -394,13 +394,17 @@ class Store:
             d["snapshot"] = _load(r["snapshot"])
         return d
 
-    def obter_execucao(self, rid: str, com_snapshot: bool = False) -> dict[str, Any] | None:
+    def obter_execucao(self, rid: str, com_snapshot: bool = False, com_fluxo: bool = False) -> dict[str, Any] | None:
         with self._conexao() as c:
             r = c.execute("SELECT * FROM runs WHERE id = ?", (rid,)).fetchone()
             if r is None:
                 return None
             passos = c.execute("SELECT * FROM run_steps WHERE run_id = ? ORDER BY position", (rid,)).fetchall()
-        d = self._execucao(r, com_snapshot)
+        d = self._execucao(r, com_snapshot or com_fluxo)
+        if com_fluxo:  # o fluxo exatamente como foi executado (para abrir uma execução antiga no designer)
+            d["flow"] = d["snapshot"].get("flow")
+            if not com_snapshot:
+                del d["snapshot"]
         d["steps"] = [
             {"step_id": s["step_id"], "iteration": _load(s["iteration"]) or [], "position": s["position"],
              "state": s["state"], "started_at": s["started_at"], "finished_at": s["finished_at"],
