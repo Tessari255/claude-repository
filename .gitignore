@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+# Dados locais (SQLite) — nunca versionar
+data/
+*.db
+*.db-wal
+*.db-shm
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/test-results/
+frontend/playwright-report/
+# Outros
+.env
+.DS_Store
