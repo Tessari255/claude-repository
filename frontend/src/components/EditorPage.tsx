@@ -4,6 +4,7 @@ import {
   achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
   remover, todosOsPassos, usaOPasso, MAX_PROFUNDIDADE, type Destino,
 } from '../lib/modelo'
+import { useAtalhos } from '../hooks/useAtalhos'
 import { useHistorico } from '../hooks/useHistorico'
 import { slugDeId } from '../lib/visual'
 import type { BlockType, Flow, Issue, Passo, PortTypes, Project, Run, SystemInfo } from '../types'
@@ -348,26 +349,16 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   }
 
   // -------------------------------------------------------------------------- teclado
-  useEffect(() => {
-    function aoTeclar(e: KeyboardEvent) {
-      if (document.querySelector('[role="dialog"]')) return
-      const alvo = e.target as HTMLElement
-      const emCampo = !!alvo.closest('input, textarea, select, [contenteditable="true"], .cm-editor')
-      const ctrl = e.ctrlKey || e.metaKey
-      if (ctrl && e.key.toLowerCase() === 's') { e.preventDefault(); void salvar(); return }
-      if (ctrl && e.key === 'Enter') { e.preventDefault(); abrirTeste(true); return }
-      if (emCampo) return
-      if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); hist.desfazer(); return }
-      if (ctrl && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); hist.refazer(); return }
-      if (e.key === 'Escape') {
-        setDestino(null)
-        setPainel((p) => (p === 'adicionar' || p === 'passo' ? null : p))
-      }
-    }
-    window.addEventListener('keydown', aoTeclar)
-    return () => window.removeEventListener('keydown', aoTeclar)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salvar, hist.desfazer, hist.refazer])
+  useAtalhos({
+    salvar: () => void salvar(),
+    testar: () => abrirTeste(true),
+    desfazer: hist.desfazer,
+    refazer: hist.refazer,
+    fechar: () => {
+      setDestino(null)
+      setPainel((p) => (p === 'adicionar' || p === 'passo' ? null : p))
+    },
+  })
 
   // -------------------------------------------------------------------------- blocos Python reutilizáveis
   async function aposSalvarBloco(b: BlockType, avisos: string[]) {
