@@ -199,7 +199,10 @@ Os **passos internos** rodam no processo da API (código nosso), então também 
 ```
 
 ```
-backend/app/   models (formato v2), passos (percorrer a árvore), validation (verificador), engine (motor), migracao (v1→v2),
+backend/app/   models (formato v2), passos (percorrer a árvore), validation (verificador), migracao (v1→v2),
+               engine (fachada do motor: iniciar, preparar, rodar, cancelar) e os módulos dele: preparo, execucao,
+               historico (única porta de escrita do histórico), despacho, controle (condição, laços, escopo),
+               passos_simples, dinamico, erros_sandbox, teste_bloco;
                store (SQLite), exchange (export/import), custom_blocks, blocks/builtin.py (passos internos),
                sandbox/executor.py (Docker), api.py, main.py
 executor/      Dockerfile + runner.py (roda DENTRO do contêiner)

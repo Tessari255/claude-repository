@@ -6,7 +6,8 @@ regulares fornecidas pelo usuário e limitam o tamanho das contas. Qualquer cois
 em Python roda exclusivamente no executor isolado.
 
 Os blocos de controle (condição, para cada, repetir até, escopo, encerrar) e as variáveis são executados
-pelo motor (``engine.py``), que conhece a árvore de passos; aqui ficam só as suas definições.
+pelo motor (``engine.py`` e os módulos de que ele se serve, como ``controle.py``), que conhece a árvore de passos;
+aqui ficam só as suas definições.
 """
 
 from __future__ import annotations

@@ -17,7 +17,8 @@ from typing import cast
 
 import pytest
 
-from app import teste_bloco
+from app import controle as modulo_controle
+from app import engine, erros_sandbox, execucao, teste_bloco
 from app.blocks.builtin import ContextoBloco
 from app.config import Limites
 from app.controle import Controle, deve_rodar, motivo_ignorado
@@ -722,3 +723,14 @@ def test_a_rota_de_executar_inicia_pelo_motor_e_devolve_a_execucao_criada(client
     assert chamadas == [((pid, {"a": 4}, None), {})]
     assert aguardar(c, resposta.json()["id"])["result"]["outputs"][0]["value"] == 7
     assert c.post("/api/projetos/prj_nao_existe/execucoes", json={}).status_code == 404
+
+
+# ------------------------------------------------------------------ compatibilidade da fachada
+def test_engine_continua_expondo_os_nomes_que_moravam_nele():
+    esperado = {"ESTADOS_ROTULO": modulo_controle, "MAX_REGISTROS": execucao, "NAO_REPETIR": erros_sandbox, "erro_da_sandbox": erros_sandbox,
+                "Cancelado": execucao, "Encerrado": execucao, "Execucao": execucao, "Resultado": execucao,
+                "ResultadoLista": execucao, "chave_etapa": execucao}
+    for nome, modulo in esperado.items():
+        assert getattr(engine, nome) is getattr(modulo, nome), nome
+    assert set(engine.__all__) == set(esperado) | {"Motor"}
+    assert engine.Motor.__module__ == "app.engine"

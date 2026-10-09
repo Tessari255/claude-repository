@@ -1,4 +1,4 @@
-"""Motor de execução de fluxos em passos.
+"""Motor de execução de fluxos em passos (fachada).
 
 * A lógica de execução vive aqui, no backend; o frontend só pede e acompanha.
 * Os passos rodam **em sequência**, na ordem em que aparecem. Cada passo olha o estado do passo anterior
@@ -7,9 +7,15 @@
   deles seja configurado para rodar após a falha (o “capturar erro” de um escopo).
 * Cada execução usa um *snapshot* congelado do fluxo e das definições de bloco (com a versão fixada em
   cada passo), então editar um bloco depois não altera execuções nem fluxos existentes.
-* Blocos internos rodam aqui (código nosso); código do usuário roda SOMENTE no executor isolado.
+* Blocos internos rodam no processo da API (código nosso); código do usuário roda SOMENTE no executor isolado.
 * Uma falha que ninguém trata (nenhum passo posterior roda após ela) deixa a execução como *falhou*;
   uma falha tratada deixa a execução como *concluída*, como no Power Automate.
+
+O Motor só orquestra; cada responsabilidade mora em um módulo (todos abaixo dele, nenhum importa este):
+``preparo`` (validar e congelar o snapshot), ``execucao`` (estado de uma execução), ``historico`` (única porta de
+escrita do histórico), ``despacho`` (um passo: andamento, desfecho e erros), ``controle`` (sequência, condição, laços
+e escopo), ``passos_simples`` (blocos internos, variáveis e a ida ao executor isolado), ``dinamico`` (conteúdo
+dinâmico e regras), ``erros_sandbox`` (tradução dos erros do executor) e ``teste_bloco`` (teste isolado de um bloco).
 """
 
 from __future__ import annotations
@@ -22,9 +28,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from .config import Limites
+from .controle import ESTADOS_ROTULO
 from .despacho import Despacho
 from .errors import ApiError
-from .execucao import MAX_REGISTROS, Cancelado, Encerrado, Execucao
+from .erros_sandbox import NAO_REPETIR, erro_da_sandbox
+from .execucao import MAX_REGISTROS, Cancelado, Encerrado, Execucao, Resultado, ResultadoLista, chave_etapa
 from .historico import Historico
 from .models import BlockType, Flow
 from .passos import percorrer
@@ -36,6 +44,10 @@ from .teste_bloco import TesteDeBloco
 from .validation import nome_passo
 
 log = logging.getLogger("trama.motor")
+
+# Nomes que já foram definidos aqui e hoje moram nos módulos acima; continuam importáveis de ``app.engine``.
+__all__ = ["ESTADOS_ROTULO", "MAX_REGISTROS", "NAO_REPETIR", "Cancelado", "Encerrado", "Execucao", "Motor", "Resultado",
+           "ResultadoLista", "chave_etapa", "erro_da_sandbox"]
 
 
 class Motor:
