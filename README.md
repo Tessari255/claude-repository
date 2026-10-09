@@ -11,6 +11,7 @@ Monte fluxos como no **Power Automate**: um *gatilho* e uma lista de *passos* em
 * **Persistência:** SQLite local (`data/trama.db`): projetos, blocos Python, histórico de execuções.
 * **Executor:** um contêiner Docker novo e descartável a cada execução de código do usuário. Alguns já ficam iniciados esperando
   (*pool aquecido*) para esconder o custo de subir o Docker; cada um atende um único trabalho e morre.
+  Um *Para cada* cujo corpo é só um passo Python roda todos os itens em **um** contêiner (*lote*).
 
 É um MVP **local e de usuário único** (sem autenticação). Veja [Limitações verificadas](#limitações-verificadas).
 
@@ -153,6 +154,7 @@ def run(inputs: dict, params: dict) -> dict:
 * **Condição:** só o ramo escolhido executa; o outro (e tudo dentro dele) fica *ignorado*.
 * **Repetições:** *Para cada* (limite de itens, padrão 100, máximo 10.000) e *Repetir até* (limite de repetições, máximo 100). Cada repetição de cada passo
   tem a sua linha no histórico; no máximo 5.000 linhas por execução.
+  Um *Para cada* com **só um passo Python** dentro roda todos os itens de uma vez (veja *Para cada em lote*); o histórico é o mesmo.
 * **Falhas:** um passo que falha deixa os seguintes **ignorados**, a menos que algum deles esteja configurado para rodar após a falha (e então a falha é
   considerada tratada). Erros de configuração (campo faltando, tipo errado) nunca são repetidos; falhas do código ou do tempo limite podem ser (política de repetição do passo).
 * Limites do fluxo: 200 passos e 8 níveis de aninhamento.
@@ -188,6 +190,22 @@ menor (é o caso do limite de tempo por passo); os demais vão pelo caminho frio
 em andamento + `TRAMA_POOL` ociosos (6 no padrão, até 12 com `TRAMA_POOL=8`); cada ocioso custa um cliente `docker` (~30 MB de memória no host).
 `GET /api/sistema` mostra `pool` (configurado, prontos, acertos e faltas), sem nomes nem IDs de contêiner.
 
+**Para cada em lote.** Um *Para cada* cujo corpo é **exatamente um passo Python** (o embutido ou um bloco da biblioteca, sem novas tentativas,
+sem tempo limite próprio e com o “executar após” padrão) roda os itens em um contêiner só: o motor resolve antes as entradas de todas as iterações
+(elas só dependem do item, da posição e do que está fora do laço) e manda **um** trabalho ao executor, que chama `run` uma vez por item, no mesmo
+processo, e devolve cada resultado assim que o item termina. Medido na máquina de desenvolvimento, um laço de 50 itens foi de ~17 s (um contêiner por
+item) ou ~9 s (com o pool aquecido) para ~1 s, com ou sem pool: o lote sempre sobe um contêiner novo, porque o limite de CPU de um ocioso é o de um
+trabalho só. O que fica registrado não muda: uma linha `passo@i` por iteração, com entradas, saídas, logs e erro, e a primeira iteração que falha
+interrompe as seguintes (o erro aponta o passo, a iteração e a linha do código). Qualquer outro corpo, um laço de um item só, entradas que não
+resolvem ou uma imagem do executor sem o rótulo `trama.runner.lote` (reconstrua com `./scripts/build-executor.sh`) seguem o caminho de antes, um contêiner por item.
+
+* **Limites:** cada item tem os de sempre (tempo, memória, logs, tamanho do resultado e das entradas, vigiados dentro e fora do contêiner). O lote tem ainda um
+  tempo total de n × o tempo de um item, até `TRAMA_BATCH_TIMEOUT_S` (600 s), e um teto para as entradas somadas (1/32 da memória, até 8 MB; acima disso o laço roda um contêiner por item).
+* **Entre os itens:** o módulo do usuário é executado do zero a cada item (as variáveis globais não passam de um para o outro), `params` chega como cópia nova, o
+  `/tmp` é esvaziado e a memória é coletada. **O que vaza**, porque o processo é o mesmo: o que o código muda na biblioteca padrão (a semente do `random`,
+  a precisão do `decimal`, atributos de módulos como `math`) e os módulos já importados continuam valendo no item seguinte.
+* **Cancelar** abate o contêiner na hora, em vez de esperar o item em andamento; essa iteração fica como cancelada (no caminho de antes ela terminaria como concluída).
+
 A lista de bibliotecas permitidas dentro do runner é **só conveniência** (mensagem amigável); os testes contornam esse filtro de
 propósito para provar que o que protege é o contêiner. O processo da API precisa de acesso ao Docker — isso equivale a privilégio
 elevado no computador. Veja as limitações abaixo.
@@ -215,9 +233,9 @@ Os **passos internos** rodam no processo da API (código nosso), então também 
 backend/app/   models (formato v2), passos (percorrer a árvore), validation (verificador), migracao (v1→v2),
                engine (fachada do motor: iniciar, preparar, rodar, cancelar) e os módulos dele: preparo, execucao,
                historico (única porta de escrita do histórico), despacho, controle (condição, laços, escopo),
-               passos_simples, dinamico, erros_sandbox, teste_bloco;
+               passos_simples, lote (Para cada em lote), dinamico, erros_sandbox, teste_bloco;
                store (SQLite), exchange (export/import), custom_blocks, blocks/builtin.py (passos internos),
-               sandbox/executor.py (Docker), sandbox/pool.py (pool aquecido), api.py, main.py
+               sandbox/executor.py (Docker), sandbox/pool.py (pool aquecido), sandbox/lote.py (lote no executor), api.py, main.py
 executor/      Dockerfile + runner.py (roda DENTRO do contêiner)
 frontend/src/  components/ (Designer, PainelPasso, CampoDinamico, Verificador, PainelTeste, Historico…; EditorPage só compõe),
                hooks/ (estado com efeitos do editor: useProjeto, useCatalogo, useExecucao, useVisaoDeExecucao, useAtalhos,
@@ -259,6 +277,7 @@ O histórico de execuções antigas **não é convertido** (ele descrevia blocos
 | `TRAMA_EXECUTOR_IMAGE` | `trama-executor:2` | imagem do executor |
 | `TRAMA_TIMEOUT_S` / `TRAMA_MEMORY_MB` / `TRAMA_CPUS` / `TRAMA_PIDS` | `10` / `256` / `1` / `64` | limites do código Python |
 | `TRAMA_POOL` / `TRAMA_POOL_OCIOSO_S` | `2` / `120` | contêineres aquecidos esperando trabalho (`0` desliga; no máximo 8) e quanto um deles pode ficar parado sem receber trabalho (de 5 a 86400 s; fora disso vale o padrão) |
+| `TRAMA_BATCH_TIMEOUT_S` | `600` | tempo total máximo de um *Para cada* em lote (n × o tempo de um item, até este valor; de 0 a 86400 s, fora disso vale o padrão) |
 | `TRAMA_LOGS_KB` / `TRAMA_VALUE_KB` / `TRAMA_MAX_LIST_ITEMS` | `64` / `1024` / `10000` | volume de logs, tamanho de cada valor, itens por lista |
 | `TRAMA_HOST` / `TRAMA_PORT` | `127.0.0.1` / `8000` | só local por padrão (não há autenticação) |
 | `TRAMA_ALLOWED_HOSTS` / `TRAMA_ALLOWED_ORIGINS` | localhost… / vazio | proteção contra requisições de outros sites |
@@ -270,9 +289,9 @@ O histórico de execuções antigas **não é convertido** (ele descrevia blocos
 ## Testes
 
 ```bash
-make test-backend    # 458 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
+make test-backend    # 608 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
 make test-frontend   # typecheck + 20 testes unitários (vitest) das operações sobre o fluxo
-make e2e             # 27 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
+make e2e             # 28 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
                      # 1ª vez: `cd frontend && npx playwright install chromium` (ou PLAYWRIGHT_CHROMIUM_PATH=/caminho/do/chrome)
 ```
 
@@ -293,6 +312,7 @@ make e2e             # 27 testes no navegador (Playwright) + verificação autom
 | 11 | Tentar e capturar: falha tratada deixa a execução como sucesso; falha sem tratamento, como falhou | `test_engine.py::test_passo_com_executar_apos_falhou_*`, `test_escopo_que_falha_*`; e2e `tentar e capturar…` |
 | 12 | Fluxos e bancos da versão anterior são convertidos mantendo o resultado dos quatro exemplos originais | `test_migracao.py` (com arquivos reais em `tests/fixtures/v1/`); e2e `arquivo exportado pela versão anterior…` |
 | 13 | O histórico abre o fluxo **da época**, somente leitura | `test_api.py::test_a_execucao_guarda_o_fluxo_da_epoca_*`; e2e `histórico: abrir uma execução antiga…` |
+| 14 | Um *Para cada* de 50 itens com um passo Python dentro roda em menos de 5 s (~1 s), e o histórico é o mesmo do caminho de um contêiner por item | `test_python_flows.py::test_laco_de_50_itens_*`; `test_lote_equivalencia.py` (41 fluxos nos dois caminhos); e2e `Para cada com um passo Python dentro…` |
 
 O isolamento é verificado **de dentro do contêiner**: usuário 65534, rootfs somente leitura (inclusive `/var/tmp`), só a interface `lo`,
 capacidades zeradas, `NoNewPrivs`, seccomp ativo, limites de memória/pids/CPU lidos do cgroup, bomba de processos contida, sem
@@ -301,6 +321,9 @@ Para o executor também foi feita uma checagem de mutação: remover `--network 
 Os testes de isolamento de `test_executor.py` rodam duas vezes, com um contêiner novo por trabalho e com o pool aquecido; `test_pool.py` cobre a lógica do pool,
 o comando e o script do contêiner ocioso (sem Docker) e `test_pool_docker.py` prova, com o Docker, um contêiner por trabalho, o ocioso que expira,
 a API morta, o desligamento, o teto de contêineres e a queda para o caminho frio.
+O lote tem os seus: `test_lote.py` (tetos, leitura das linhas do runner e entrega em ordem, sem Docker), `test_lote_motor.py` (o laço no motor com um executor
+simulado), `test_lote_docker.py` (limites por item, o que é refeito e o que vaza entre itens, cancelamento que abate o contêiner, mesmo isolamento) e
+`test_lote_equivalencia.py` (cada fluxo nos dois caminhos, com o histórico normalizado idêntico).
 
 ---
 
@@ -328,9 +351,11 @@ dados malformados. Os mesmos testes foram portados para o formato em passos (a s
   **Não testado** em macOS/Windows (Docker Desktop), Podman ou Docker rootless.
 * Cada execução de código Python usa um contêiner só dela. Sem o pool (`TRAMA_POOL=0`), ou quando ele está vazio, isso custa o **início do contêiner** (≈300 ms na máquina de
   desenvolvimento, ≈1 s em máquinas mais lentas); com o pool, esse custo some enquanto houver ocioso pronto, mas um passo ainda leva ~150 ms (o Python da imagem
-  precisa subir) e um passo Python dentro de um *Para cada* paga isso **por item** (50 itens: ~8 s medidos; a execução em lote do laço ainda não existe).
+  precisa subir). Um passo Python dentro de um *Para cada* paga isso **por item** (50 itens: ~9 s medidos com o pool) quando o laço não roda em lote, isto é, quando
+  há outros passos junto, o passo tem tentativas ou tempo limite próprio, o laço tem um item só ou a imagem do executor é antiga; em lote, os 50 itens levam ~1 s.
   No máximo 4 contêineres de trabalho rodam em paralelo, mais os ociosos do pool.
 * A **tentativa de cancelar** interrompe o fluxo entre passos (e a espera entre tentativas); um código Python já em andamento termina ou estoura o limite de tempo.
+  A exceção é um *Para cada* em lote: o contêiner é abatido na hora e a iteração em andamento fica como cancelada.
   Se o servidor reiniciar no meio, as execuções ficam marcadas como falha. Rode **um único processo** do servidor.
 * O histórico de execuções **não tem política de retenção** (cresce até o projeto ser excluído).
 * Dentro do contêiner ainda são legíveis metadados do host sem segredos (`/proc/version`, `/proc/meminfo`, `mountinfo`, `/etc/resolv.conf`); como não há rede, não há o que fazer com eles.

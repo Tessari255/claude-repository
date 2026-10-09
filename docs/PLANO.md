@@ -29,7 +29,8 @@ aninhados, conteúdo dinâmico tipado, "executar após", retentativas); verifica
    ou `nome.title()` usando as fichas como variáveis. Todas as expressões de um passo são avaliadas numa única chamada ao contêiner.
 2. **Pool aquecido de contêineres**: N contêineres pré-iniciados esperando no `stdin`; cada um atende um único trabalho e morre
    ("um contêiner por execução" continua valendo, só some o ≈1 s). Em laços, opção de executar o corpo em lote quando é só Python.
-   *Feito:* o pool (`TRAMA_POOL`, `sandbox/pool.py`). *Falta:* a execução em lote em laços.
+   *Feito:* o pool (`TRAMA_POOL`, `sandbox/pool.py`) e a execução em lote em laços (`lote.py`, `sandbox/lote.py`, modo `batch` do
+   runner): um *Para cada* de 50 itens com um passo Python dentro foi de ~9 s (com o pool) para ~1 s.
 3. **Imagem com bibliotecas curadas** (`pandas`, `numpy`, `python-dateutil`, `tabulate`…) como imagem opcional separada; rede continua desligada.
 4. **Editor de código melhor**: autocompletar de `inputs["…"]`/`params["…"]` a partir das entradas declaradas; lint (`pyflakes`) antes de testar.
 5. **Testar só este passo** com as entradas da última execução.
