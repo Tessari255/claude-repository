@@ -4,6 +4,7 @@ os blocos Python reutilizáveis da biblioteca. Contrato do código, erros com li
 from __future__ import annotations
 
 import dataclasses
+import time
 
 import pytest
 from pydantic import ValidationError
@@ -17,7 +18,21 @@ from app.sandbox import DockerExecutor
 from app.validation import analisar
 
 from .conftest import IMAGEM, _montar
-from .helpers import campo, carregar_exemplo, compor, estados, etapas, fluxo, lit, passo, python_inline, ref, repeticoes, saida
+from .helpers import (
+    aguardar,
+    campo,
+    carregar_exemplo,
+    compor,
+    estados,
+    etapas,
+    fluxo,
+    lit,
+    passo,
+    python_inline,
+    ref,
+    repeticoes,
+    saida,
+)
 
 pytestmark = pytest.mark.docker
 
@@ -140,6 +155,24 @@ def test_codigo_dentro_de_um_laco_roda_uma_vez_por_item(com_docker):
     f = fluxo([passo("laco", "builtin.para_cada", {"lista": ref("gatilho", "l")}, {"limite": 5}, slots={"corpo": [p]})], [campo("l", "lista", [2, 3, 4])])
     run = com_docker.executar(f)
     assert [repeticoes(run, "quadrado")[(i,)]["outputs"]["n"] for i in range(3)] == [4, 9, 16]
+
+
+def test_laco_de_50_itens_com_um_passo_python_roda_em_menos_de_5_s_pela_api(client):
+    """Critério de "pronto" da Fase 1: o corpo do laço é um único passo Python, então os 50 itens vão em um contêiner só
+    (um contêiner por item levaria uns 8 s com o pool aquecido e uns 17 s sem ele)."""
+    p = python_inline("quadrado", "def run(inputs, params):\n    return {'n': inputs['n'] ** 2}", {"n": ("numero", ref("laco", "item"))}, {"n": "numero"})
+    f = fluxo([passo("laco", "builtin.para_cada", {"lista": ref("gatilho", "l")}, {"limite": 100}, slots={"corpo": [p]}),
+               saida("s", "n", ref("laco", "quantidade"))], [campo("l", "lista", list(range(50)))])
+    projeto = client.post("/api/projetos", json={"name": "laço de 50", "flow": f}).json()
+    inicio = time.monotonic()
+    rid = client.post(f"/api/projetos/{projeto['id']}/execucoes", json={}).json()["id"]
+    run = aguardar(client, rid, timeout=30)
+    total_s = time.monotonic() - inicio
+    assert run["state"] == "concluido", run["error"]
+    assert total_s < 5, f"o laço de 50 itens levou {total_s:.1f} s"
+    reps = repeticoes(run, "quadrado")
+    assert [reps[(i,)]["outputs"]["n"] for i in range(50)] == [i * i for i in range(50)]
+    assert valores(run) == {"n": 50}
 
 
 def test_passos_python_encadeados_rodam_em_conteineres_separados_sem_dividir_arquivos(com_docker):

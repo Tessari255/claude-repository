@@ -246,23 +246,28 @@ LENTO = "import time\ndef run(inputs, params):\n    if inputs['n'] >= 1:\n      
 
 def test_cancelar_durante_o_lote_abate_o_contêiner_na_hora_e_os_itens_prontos_foram_entregues(executor):
     cancelar = threading.Event()
+    primeiro_entregue = threading.Event()
+    recebidos: list[tuple[int, SandboxResult]] = []
     resultado: dict = {}
 
+    def ao_item(posicao: int, r: SandboxResult) -> bool:
+        recebidos.append((posicao, r))
+        primeiro_entregue.set()
+        return True
+
     def rodar():
-        resultado["r"] = lote(executor, LENTO, [{"n": n} for n in range(4)], cancelar=cancelar, tempo_s=120, lote_tempo_max_s=300)
+        lim = dataclasses.replace(LIMITES_TESTE, tempo_s=120, lote_tempo_max_s=300)
+        resultado["desfecho"] = executor.run_lote(LENTO, [{"n": n} for n in range(4)], None, lim, cancelar=cancelar, ao_item=ao_item)
 
     fio = threading.Thread(target=rodar)
     fio.start()
-    fim = time.monotonic() + 15
-    while not conteineres_de_trabalho() and time.monotonic() < fim:
-        time.sleep(0.05)
-    time.sleep(1.0)  # o primeiro item termina e o segundo (60 s) começa
+    assert primeiro_entregue.wait(30)  # o item 0 terminou: agora o item 1 começa a dormir (60 s)
+    time.sleep(0.5)
     inicio = time.monotonic()
     cancelar.set()
     fio.join(10)
     assert not fio.is_alive() and time.monotonic() - inicio < 5  # sem esperar os 60 s do item em andamento
-    desfecho, recebidos = resultado["r"]
-    assert desfecho == "cancelado" and [p for p, _ in recebidos] == [0] and recebidos[0][1].ok  # o item em andamento não ganha resultado
+    assert resultado["desfecho"] == "cancelado" and [p for p, _ in recebidos] == [0] and recebidos[0][1].ok  # o item em andamento não ganha resultado
     assert conteineres_de_trabalho() == []  # o contêiner morreu e foi removido
 
 

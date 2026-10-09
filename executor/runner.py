@@ -373,7 +373,7 @@ def _limpar_tmp():
                 shutil.rmtree(entrada.path, ignore_errors=True)
             else:
                 os.unlink(entrada.path)
-        except OSError:
+        except Exception:  # nada que o item deixou em /tmp pode derrubar o runner entre dois itens
             pass
 
 
