@@ -198,7 +198,8 @@ def test_runner_arma_memoria_e_temporizador_so_ao_receber_o_trabalho(fazer):
 
 
 def test_vigia_do_trabalho_encerra_codigo_orfao_se_o_host_morrer_depois_do_recebimento(fazer):
-    """Como o teste do vigia do caminho frio, mas com o contêiner do pool: o vigia nasce do recebimento do trabalho."""
+    """Como o teste do vigia do caminho frio, mas com o script do contêiner do pool: o vigia nasce do recebimento do trabalho.
+    A linha de partida aqui é montada à mão; o valor que o executor realmente manda é conferido no teste seguinte."""
     ex = fazer(pool=1, aquecer=False)
     lim = dataclasses.replace(LIMITES_TESTE, tempo_s=1.0, folga_inicio_s=0.0)  # vigia do trabalho = 6 s
     nome = "trama-teste-vigia-pool"
@@ -230,6 +231,17 @@ def test_vigia_do_trabalho_encerra_codigo_orfao_se_o_host_morrer_depois_do_receb
         assert parou[1] == "137"  # morto pelo vigia (SIGKILL)
     finally:
         subprocess.run(["docker", "rm", "-f", nome], capture_output=True)
+
+
+def test_vigia_que_o_executor_manda_ao_conteiner_do_pool_e_o_do_trabalho_igual_ao_do_caminho_frio(fazer):
+    """O `timeout` é o PID 1 do contêiner: ler o /proc/1/cmdline de dentro mostra o vigia que `_rodar` de fato enviou."""
+    codigo = "def run(inputs, params):\n    return {'h': open('/proc/1/cmdline', 'rb').read().replace(b'\\0', b' ').decode()}"
+    lim = dataclasses.replace(LIMITES_TESTE, tempo_s=1.0, folga_inicio_s=0.0)  # vigia do trabalho = 6 s; o do padrão seria 14 s
+    esperado = "timeout -s KILL 6 python -I /opt/trama/runner.py "
+    quente = fazer(pool=1)
+    assert host(quente.run("block", codigo, limits=lim)) == esperado
+    assert quente.estado_pool()["acertos"] == 1  # veio mesmo do pool
+    assert host(fazer(pool=0).run("block", codigo, limits=lim)) == esperado
 
 
 # ------------------------------------------------------------------- ocioso expira, API morre, desligamento
