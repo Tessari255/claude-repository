@@ -7,6 +7,7 @@ import {
 import { useAtalhos } from '../hooks/useAtalhos'
 import { useCatalogo } from '../hooks/useCatalogo'
 import { useHistorico } from '../hooks/useHistorico'
+import { useVisaoDeExecucao } from '../hooks/useVisaoDeExecucao'
 import { useVivo } from '../hooks/useVivo'
 import { montarDefs } from '../lib/catalogo'
 import { slugDeId } from '../lib/visual'
@@ -62,8 +63,8 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   const [run, setRun] = useState<Run | null>(null)
   const [executando, setExecutando] = useState(false)
   const [historicoRuns, setHistoricoRuns] = useState<Run[]>([])
-  const [visao, setVisao] = useState<{ run: Run; flow: Flow } | null>(null)
-  const [iteracoes, setIteracoes] = useState<Record<string, number>>({})
+  const visao = useVisaoDeExecucao()
+  const { iteracoes, voltar: voltarAoFluxo } = visao
   const [dialogo, setDialogo] = useState<Dialogo>(null)
   const [iniciarTeste, setIniciarTeste] = useState(false)
 
@@ -72,9 +73,9 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   const estado = useRef({ flow: flowAtual, nome, projeto })
   estado.current = { flow: flowAtual, nome, projeto }
 
-  const flow = visao?.flow ?? flowAtual
-  const somenteLeitura = !!visao
-  const runVisivel = visao ? visao.run : run
+  const flow = visao.atual?.flow ?? flowAtual
+  const somenteLeitura = visao.atual !== null
+  const runVisivel = visao.atual ? visao.atual.run : run
 
   // -------------------------------------------------------------------------- carga inicial
   useEffect(() => {
@@ -99,7 +100,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
 
   // -------------------------------------------------------------------------- derivados
   const fluxoJson = useMemo(() => (flowAtual ? JSON.stringify(flowAtual) : ''), [flowAtual])
-  const sujo = salvoJson !== null && !visao && (fluxoJson !== salvoJson || nome !== projeto?.name)
+  const sujo = salvoJson !== null && !somenteLeitura && (fluxoJson !== salvoJson || nome !== projeto?.name)
 
   useEffect(() => {
     const aviso = (e: BeforeUnloadEvent) => { if (sujo) { e.preventDefault(); e.returnValue = '' } }
@@ -122,10 +123,10 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   }, [vivo])
 
   useEffect(() => {
-    if (salvoJson === null || visao) return
+    if (salvoJson === null || somenteLeitura) return
     const t = window.setTimeout(revalidar, 350)
     return () => window.clearTimeout(t)
-  }, [fluxoJson, salvoJson, revalidar, sistema?.executor.disponivel, visao])
+  }, [fluxoJson, salvoJson, revalidar, sistema?.executor.disponivel, somenteLeitura])
 
   const erros = useMemo(() => analise.issues.filter((i) => i.severity === 'erro'), [analise.issues])
   const executorOk = sistema?.executor.disponivel ?? false
@@ -206,7 +207,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   // -------------------------------------------------------------------------- salvar / exportar
   const salvar = useCallback(async (): Promise<boolean> => {
     const { flow: f, nome: n, projeto: p } = estado.current
-    if (!p || !f || salvando || visao) return false
+    if (!p || !f || salvando || somenteLeitura) return false
     setSalvando(true)
     try {
       const salvo = await api.salvarProjeto(p.id, { name: n.trim() || p.name, flow: f, base_revision: p.revision })
@@ -227,7 +228,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     } finally {
       setSalvando(false)
     }
-  }, [salvando, visao, notificar, revalidar])
+  }, [salvando, somenteLeitura, notificar, revalidar])
 
   async function exportar() {
     if (!flow) return
@@ -277,7 +278,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
       notificar.info('O fluxo está vazio', 'Adicione ao menos um passo antes de testar.')
       return
     }
-    setExecutando(true); setRun(null); setVisao(null); setIteracoes({})
+    setExecutando(true); setRun(null); voltarAoFluxo()
     try {
       const r = await api.executar(p.id, f, dados)
       setRun(r)
@@ -292,7 +293,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
         notificar.erro('O fluxo não foi testado', `${x.issues.length} ${x.issues.length === 1 ? 'problema precisa' : 'problemas precisam'} ser corrigido(s). Veja o verificador de fluxo.`)
       } else notificar.erro('Não foi possível testar', [x.message, x.issues[0]?.message].filter(Boolean).join(' '))
     }
-  }, [executando, acompanhar, revalidar, notificar])
+  }, [executando, acompanhar, revalidar, notificar, voltarAoFluxo])
 
   function abrirTeste(iniciar = false) {
     setIniciarTeste(iniciar)
@@ -309,15 +310,14 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     try {
       const completa = await api.execucaoComFluxo(r.id)
       await catalogo.garantirDefs(completa.flow)
-      setVisao({ run: completa, flow: completa.flow })
-      setIteracoes({})
+      visao.abrir({ run: completa, flow: completa.flow })
       setSelecionadoId(null)
       setPainel('historico')
     } catch (e) { notificar.erro('Não foi possível abrir a execução', (e as ApiFailure).message) }
   }
 
   function reenviar(r: Run) {
-    setVisao(null)
+    visao.fechar()
     abrirTeste(false)
     void testar(r.trigger_inputs)
   }
@@ -369,7 +369,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     ? (destino.paiId ? `Dentro de “${nomeDoId(destino.paiId)}”${destino.espaco ? ` (${defDe(acharQualquer(flow, destino.paiId)!)?.slots.find((s) => s.id === destino.espaco)?.label ?? destino.espaco})` : ''}`
       : destino.indice === 0 ? 'Logo depois do gatilho' : `Depois de “${nomeDoId(flow.steps[destino.indice - 1].id)}”`)
     : ''
-  const painelAtual: Painel = visao && painel === 'passo' && !selecionado ? 'historico' : painel
+  const painelAtual: Painel = visao.atual && painel === 'passo' && !selecionado ? 'historico' : painel
 
   return (
     <div className="editor">
@@ -411,11 +411,11 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
           </Aviso>
         </div>
       )}
-      {visao && (
+      {visao.atual && (
         <div className="banner-visao" role="status">
           <Icon name="history" size={16} />
           <span>Você está vendo uma execução antiga, com o fluxo como ele era naquele momento. Nada aqui pode ser alterado.</span>
-          <button className="btn btn-pequeno" onClick={() => { setVisao(null); setIteracoes({}) }}>Voltar ao fluxo atual</button>
+          <button className="btn btn-pequeno" onClick={visao.voltar}>Voltar ao fluxo atual</button>
         </div>
       )}
 
@@ -427,7 +427,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
               flow={flow} defDe={defDe} selecionadoId={selecionadoId} destinoAtivo={painelAtual === 'adicionar' ? destino : null}
               onSelecionar={selecionar} onAdicionar={abrirSeletor} onAcao={acao} problemas={somenteLeitura ? [] : analise.issues}
               run={runVisivel} somenteLeitura={somenteLeitura} iteracoes={iteracoes}
-              onIteracao={(k, n) => setIteracoes((m) => ({ ...m, [k]: n }))} ultimasVersoes={ultimasVersoes}
+              onIteracao={visao.escolherIteracao} ultimasVersoes={ultimasVersoes}
             />
           </ErrorBoundary>
         </main>
@@ -467,7 +467,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
             <Verificador problemas={analise.issues} nomeDe={nomeDoId} onIr={irParaPasso} onFechar={() => setPainel(null)} verificando={verificando} />
           )}
           {painelAtual === 'historico' && (
-            <Historico runs={historicoRuns.filter((h) => h.kind === 'fluxo')} abertoId={visao?.run.id ?? null} onAbrir={(r) => void abrirExecucao(r)}
+            <Historico runs={historicoRuns.filter((h) => h.kind === 'fluxo')} abertoId={visao.atual?.run.id ?? null} onAbrir={(r) => void abrirExecucao(r)}
               onReenviar={reenviar} onFechar={() => setPainel(null)} ocupado={executando} />
           )}
         </ErrorBoundary>
