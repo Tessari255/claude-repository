@@ -40,6 +40,11 @@ describe('atalhos de teclado do editor', () => {
     expect(acaoDoAtalho(ctrl('a'), false)).toBeNull()
   })
 
+  it('um keydown sem `key` (o Chrome dispara um ao escolher uma sugestão de preenchimento) é ignorado, não lança', () => {
+    const semKey = { ctrlKey: false, metaKey: false, shiftKey: false } as unknown as Tecla
+    for (const emCampo of [false, true]) expect(acaoDoAtalho(semKey, emCampo)).toBeNull()
+  })
+
   it('só Esc deixa o comportamento padrão do navegador em paz', () => {
     expect(precisaImpedirPadrao('fechar')).toBe(false)
     for (const a of ['salvar', 'testar', 'desfazer', 'refazer'] as const) expect(precisaImpedirPadrao(a)).toBe(true)

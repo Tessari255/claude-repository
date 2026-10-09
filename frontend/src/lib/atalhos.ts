@@ -8,7 +8,8 @@ export type Tecla = { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey:
 
 export function acaoDoAtalho(t: Tecla, emCampo: boolean): AcaoDeAtalho | null {
   const ctrl = t.ctrlKey || t.metaKey
-  const k = t.key.toLowerCase()
+  // O Chrome dispara um keydown genérico, sem `key`, ao escolher uma sugestão de preenchimento automático.
+  const k = (t.key ?? '').toLowerCase()
   if (ctrl && k === 's') return 'salvar'
   if (ctrl && t.key === 'Enter') return 'testar'
   if (emCampo) return null
