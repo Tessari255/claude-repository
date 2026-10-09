@@ -19,24 +19,20 @@ import threading
 import time
 from typing import Any
 
-from .blocks.builtin import (
-    ContextoBloco,
-)
+from .blocks.builtin import ContextoBloco
 from .config import Limites
-from .controle import Controle
+from .despacho import Despacho
 from .errors import ApiError, ErroBloco
 from .execucao import (
     MAX_REGISTROS,
     Cancelado,
     Encerrado,
     Execucao,
-    Resultado,
     falha_de,
 )
 from .historico import Historico
 from .models import BlockType, Flow, Passo
 from .passos import definicao_efetiva, percorrer
-from .passos_simples import PassosSimples
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store, agora
@@ -64,8 +60,7 @@ class Motor:
         self.executor = executor
         self.registro = registro
         self.limites = limites
-        self.simples = PassosSimples(self.historico, executor, limites)
-        self.controle = Controle(self.historico, limites, self._passo)
+        self.despacho = Despacho(self.historico, executor, limites)
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="trama-exec")
         self._cancelamentos: dict[str, threading.Event] = {}
         self._trava = threading.Lock()
@@ -167,13 +162,13 @@ class Motor:
         estado, erro, mensagem = "concluido", None, None
         try:
             ex.checar_cancelamento()
-            r = self._passo(ex, flow.trigger, ())
+            r = self.despacho.passo(ex, flow.trigger, ())
             falhas = list(r.falhas)
             if r.estado != "falhou":
-                falhas = self.controle.lista(ex, flow.steps, ()).falhas
+                falhas = self.despacho.controle.lista(ex, flow.steps, ()).falhas
             else:
                 for p in flow.steps:
-                    self.controle.ignorar(ex, p, (), "O gatilho falhou, então o fluxo não seguiu.")
+                    self.despacho.controle.ignorar(ex, p, (), "O gatilho falhou, então o fluxo não seguiu.")
             if falhas:
                 estado, erro = "falhou", falhas[0]
         except Encerrado as e:
@@ -194,53 +189,6 @@ class Motor:
         self.historico.atualizar_execucao(
             run_id, state=estado, finished_at=agora(), duration_ms=int((time.monotonic() - inicio) * 1000),
             result=resultado, error=erro)
-
-    # ------------------------------------------------------------------ um passo
-    def _tipo(self, ex: Execucao, passo: Passo) -> BlockType:
-        return ex.defs[f"{passo.type}@{passo.version}"]
-
-    def _passo(self, ex: Execucao, passo: Passo, iteracao: tuple[int, ...]) -> Resultado:
-        tipo = self._tipo(ex, passo)
-        nome = ex.nomes.get(passo.id, passo.id)
-        t0 = time.monotonic()
-        ctx = ContextoBloco(limites=self.limites, dados_gatilho=ex.trigger_inputs)
-        self.historico.gravar_etapa(ex, passo.id, iteracao, state="executando", started_at=agora())
-        try:
-            if tipo.slots:
-                saidas, falhas, extra_logs = self.controle.conteiner(ex, passo, tipo, iteracao)
-                ctx.logs.extend(extra_logs)
-                dur = int((time.monotonic() - t0) * 1000)
-                if falhas:
-                    erro = ErroBloco(
-                        f"O passo “{falhas[0]['step_name']}” dentro deste bloco falhou: {falhas[0]['message']}",
-                        codigo="falha_em_passo_interno")
-                    self.historico.gravar_etapa(ex, passo.id, iteracao, state="falhou", finished_at=agora(), duration_ms=dur,
-                                                outputs=saidas, logs=ctx.logs, error=erro.como_dict())
-                    return Resultado("falhou", False, falhas, falhas[0]["message"])
-                self.historico.gravar_etapa(ex, passo.id, iteracao, state="concluido", finished_at=agora(), duration_ms=dur,
-                                            outputs=saidas, logs=ctx.logs)
-                return Resultado("concluido")
-            saidas = self.simples.executar_folha(ex, passo, tipo, iteracao, ctx)
-            self.historico.gravar_etapa(ex, passo.id, iteracao, state="concluido", finished_at=agora(),
-                                        duration_ms=int((time.monotonic() - t0) * 1000), outputs=saidas, logs=ctx.logs)
-            return Resultado("concluido")
-        except (Cancelado, Encerrado) as e:
-            estado = "cancelado" if isinstance(e, Cancelado) or (isinstance(e, Encerrado) and e.estado == "cancelado") else "concluido"
-            self.historico.gravar_etapa(ex, passo.id, iteracao, state=estado, finished_at=agora(),
-                                        duration_ms=int((time.monotonic() - t0) * 1000), logs=ctx.logs)
-            raise
-        except ErroBloco as e:
-            dur = int((time.monotonic() - t0) * 1000)
-            self.historico.gravar_etapa(ex, passo.id, iteracao, state="falhou", finished_at=agora(), duration_ms=dur,
-                                        logs=ctx.logs, error=e.como_dict())
-            return Resultado("falhou", e.codigo == "tempo_esgotado", [falha_de(passo.id, nome, e)], e.mensagem)
-        except Exception as e:
-            log.exception("Erro inesperado no passo %s", passo.id)
-            erro = ErroBloco("Ocorreu um erro interno ao executar este passo.", codigo="erro_interno",
-                             tecnico={"type": type(e).__name__})
-            self.historico.gravar_etapa(ex, passo.id, iteracao, state="falhou", finished_at=agora(),
-                                        duration_ms=int((time.monotonic() - t0) * 1000), logs=ctx.logs, error=erro.como_dict())
-            return Resultado("falhou", False, [falha_de(passo.id, nome, erro)], erro.mensagem)
 
     # --------------------------------------------------------------- teste isolado
     def testar_bloco(self, tipo: BlockType, params: dict[str, Any], entradas: dict[str, Any],
@@ -287,7 +235,7 @@ class Motor:
                       trigger_inputs={}, cancelar=threading.Event())
         try:
             ef = definicao_efetiva(tipo, params)
-            saidas = self.simples.executar(ex, passo, tipo, ef, entradas, parametros_efetivos(tipo, params), ctx)
+            saidas = self.despacho.simples.executar(ex, passo, tipo, ef, entradas, parametros_efetivos(tipo, params), ctx)
         except ErroBloco as e:
             dur = int((time.monotonic() - t0) * 1000)
             self.historico.atualizar_etapa(rid, "teste", state="falhou", finished_at=agora(), duration_ms=dur,

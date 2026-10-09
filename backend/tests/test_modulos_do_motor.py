@@ -10,27 +10,29 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from app.blocks.builtin import ContextoBloco
 from app.config import Limites
 from app.controle import Controle, deve_rodar, motivo_ignorado
+from app.despacho import Despacho
 from app.dinamico import avaliar_regras, montar_entradas, resolver_campo, valor_da_ref
 from app.errors import ErroBloco
 from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
-from app.execucao import MAX_REGISTROS, Cancelado, Execucao, Resultado, chave_etapa, falha_de
+from app.execucao import MAX_REGISTROS, Cancelado, Encerrado, Execucao, Resultado, chave_etapa, falha_de
 from app.historico import Historico
 from app.models import Campo, Flow, Passo, Ref
 from app.passos_simples import PassosSimples
-from app.sandbox import ExecutorStatus, SandboxResult
+from app.sandbox import DockerExecutor, ExecutorStatus, SandboxResult
 
-from .helpers import campo, compor, condicao, fluxo, lit, passo, python_inline, ref, saida, tpl
+from .helpers import campo, compor, condicao, fluxo, lit, matematica, passo, python_inline, ref, saida, tpl
 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "despacho", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -491,3 +493,78 @@ def test_escopo_resume_o_resultado_de_cada_passo_e_devolve_a_falha_ao_nivel_de_c
         {"passo": "Passo A", "estado": "concluido", "erro": None}, {"passo": "Passo B", "estado": "falhou", "erro": "deu ruim"}]}
     assert falhas == _falhou("b").falhas
     assert ex.valores["tentar"] == saidas  # o passo seguinte lê o resumo como conteúdo dinâmico
+
+
+# ------------------------------------------------------------------ despacho de um passo
+def _despacho(sem_docker, etapas):
+    historico, ex = _execucao_com_linha(sem_docker.store, etapas)
+    tipos = [sem_docker.registro.resolver(t, 1) for t in ("builtin.compor", "builtin.matematica", "builtin.escopo")]
+    ex.defs = {f"{t.id}@{t.version}": t for t in tipos}
+    ex.nomes = {e: f"Passo {e.upper()}" for e in etapas}
+    return Despacho(historico, cast(DockerExecutor, ExecutorFalso()), Limites()), ex
+
+
+def _levantar(excecao):
+    def levantar(*args, **kwargs):
+        raise excecao
+    return levantar
+
+
+def test_passo_concluido_passa_por_executando_e_grava_entradas_saidas_e_duracao(sem_docker):
+    d, ex = _despacho(sem_docker, ("c",))
+    assert d.passo(ex, Passo.model_validate(compor("c", lit(7))), ()) == Resultado("concluido")
+    linha = _linhas(sem_docker, ex)[("c", ())]
+    assert (linha["state"], linha["inputs"], linha["outputs"]) == ("concluido", {"entrada": 7}, {"resultado": 7})
+    assert linha["started_at"] and linha["finished_at"] and linha["duration_ms"] >= 0
+
+
+def test_falha_prevista_vira_resultado_falhou_com_o_erro_gravado_no_passo(sem_docker):
+    d, ex = _despacho(sem_docker, ("m",))
+    r = d.passo(ex, Passo.model_validate(matematica("m", lit(1), lit(0), "dividir")), ())
+    assert r.estado == "falhou" and not r.expirou and r.mensagem == "Não é possível dividir por zero."
+    assert r.falhas[0]["step_id"] == "m" and r.falhas[0]["step_name"] == "Passo M" and r.falhas[0]["code"] == "divisao_por_zero"
+    linha = _linhas(sem_docker, ex)[("m", ())]
+    assert linha["state"] == "falhou" and linha["error"]["code"] == "divisao_por_zero" and linha["outputs"] is None
+
+
+def test_tempo_esgotado_marca_o_resultado_como_expirou_para_o_executar_apos(sem_docker):
+    d, ex = _despacho(sem_docker, ("c",))
+    d.simples.executar_folha = _levantar(ErroBloco("Passou do tempo.", codigo="tempo_esgotado"))
+    r = d.passo(ex, Passo.model_validate(compor("c", lit(1))), ())
+    assert r.estado == "falhou" and r.expirou is True
+
+
+def test_erro_inesperado_nao_vaza_a_mensagem_interna_para_o_historico(sem_docker, caplog):
+    d, ex = _despacho(sem_docker, ("c",))
+    d.simples.executar_folha = _levantar(RuntimeError("segredo do servidor"))
+    r = d.passo(ex, Passo.model_validate(compor("c", lit(1))), ())
+    assert r.estado == "falhou" and r.falhas[0]["code"] == "erro_interno" and r.mensagem == "Ocorreu um erro interno ao executar este passo."
+    linha = _linhas(sem_docker, ex)[("c", ())]
+    assert linha["error"] == {"code": "erro_interno", "message": r.mensagem, "suggestion": None, "technical": {"type": "RuntimeError"}}
+    assert "segredo do servidor" not in str(linha) and "segredo do servidor" in caplog.text  # só o log do servidor guarda o detalhe
+
+
+@pytest.mark.parametrize("interrupcao,estado", [
+    (Cancelado(), "cancelado"),
+    (Encerrado("cancelado", "parei", Passo.model_validate(compor("c", lit(1)))), "cancelado"),
+    (Encerrado("sucesso", "terminei", Passo.model_validate(compor("c", lit(1)))), "concluido"),
+    (Encerrado("falha", "quebrei", Passo.model_validate(compor("c", lit(1)))), "concluido"),
+])
+def test_cancelar_e_encerrar_fecham_a_linha_do_passo_e_seguem_subindo(sem_docker, interrupcao, estado):
+    d, ex = _despacho(sem_docker, ("c",))
+    d.simples.executar_folha = _levantar(interrupcao)
+    with pytest.raises(type(interrupcao)):
+        d.passo(ex, Passo.model_validate(compor("c", lit(1))), ())
+    assert _linhas(sem_docker, ex)[("c", ())]["state"] == estado
+
+
+def test_bloco_com_passo_de_dentro_que_falhou_aponta_o_passo_e_guarda_o_resumo(sem_docker):
+    d, ex = _despacho(sem_docker, ("tentar",))
+    ex.nomes["div"] = "Dividir"
+    tentar = Passo.model_validate(passo("tentar", "builtin.escopo", slots={"corpo": [matematica("div", lit(1), lit(0), "dividir")]}))
+    r = d.passo(ex, tentar, ())
+    assert r.estado == "falhou" and r.mensagem == "Não é possível dividir por zero." and r.falhas[0]["step_id"] == "div"
+    linhas = _linhas(sem_docker, ex)
+    assert linhas[("tentar", ())]["error"]["code"] == "falha_em_passo_interno"
+    assert linhas[("tentar", ())]["error"]["message"] == "O passo “Dividir” dentro deste bloco falhou: Não é possível dividir por zero."
+    assert linhas[("tentar", ())]["outputs"]["falhou"] is True and linhas[("div", ())]["state"] == "falhou"
