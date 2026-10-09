@@ -138,3 +138,10 @@ def repeticoes(execucao: dict, step_id: str) -> dict[tuple[int, ...], dict]:
 
 def estados(execucao: dict) -> dict[str, str]:
     return {k: v["state"] for k, v in etapas(execucao).items()}
+
+
+def historico_normalizado(execucao: dict) -> dict:
+    """O registro da execução sem o que muda de uma vez para a outra (ids, horários, durações): o que dá para comparar entre dois caminhos."""
+    campos = ("step_id", "iteration", "position", "state", "inputs", "outputs", "logs", "error", "skip_reason")
+    return {"state": execucao["state"], "error": execucao["error"], "result": execucao["result"],
+            "trigger_inputs": execucao["trigger_inputs"], "steps": [{k: e[k] for k in campos} for e in execucao["steps"]]}

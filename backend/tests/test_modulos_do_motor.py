@@ -38,7 +38,7 @@ from .helpers import aguardar, campo, compor, condicao, fluxo, lit, matematica, 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "despacho", "preparo",
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "lote", "controle", "despacho", "preparo",
            "teste_bloco", "engine"]
 
 

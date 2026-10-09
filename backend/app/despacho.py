@@ -15,6 +15,7 @@ from .controle import Controle
 from .errors import ErroBloco
 from .execucao import Cancelado, Encerrado, Execucao, Resultado, falha_de
 from .historico import Historico
+from .lote import LoteDePython
 from .models import Passo
 from .passos_simples import PassosSimples
 from .sandbox import DockerExecutor
@@ -28,7 +29,7 @@ class Despacho:
         self.historico = historico
         self.limites = limites
         self.simples = PassosSimples(historico, executor, limites)
-        self.controle = Controle(historico, limites, self.passo)
+        self.controle = Controle(historico, limites, self.passo, LoteDePython(self.simples, historico, limites))
 
     def passo(self, ex: Execucao, passo: Passo, iteracao: tuple[int, ...]) -> Resultado:
         tipo = ex.defs[f"{passo.type}@{passo.version}"]

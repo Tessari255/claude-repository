@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .errors import ErroBloco
 from .models import BlockType, Flow, Passo
+
+if TYPE_CHECKING:
+    from .sandbox import SandboxResult
 
 MAX_REGISTROS = 5000  # linhas de histórico (passos × repetições) por execução
 
@@ -63,6 +66,9 @@ class Execucao:
     posicao: int = 0
     registros: int = 0
     max_registros: int = MAX_REGISTROS
+    # O que o executor isolado já devolveu para o passo (por id) e que ele usa no lugar de chamar o executor: é como o
+    # lote de um laço entrega o resultado de cada item ao caminho normal de um passo Python. Quem põe aqui tira logo depois.
+    resultados_prontos: dict[str, SandboxResult] = field(default_factory=dict)
 
     def checar_cancelamento(self) -> None:
         if self.cancelar.is_set():

@@ -14,8 +14,9 @@
 O Motor só orquestra; cada responsabilidade mora em um módulo (todos abaixo dele, nenhum importa este):
 ``preparo`` (validar e congelar o snapshot), ``execucao`` (estado de uma execução), ``historico`` (única porta de
 escrita do histórico), ``despacho`` (um passo: andamento, desfecho e erros), ``controle`` (sequência, condição, laços
-e escopo), ``passos_simples`` (blocos internos, variáveis e a ida ao executor isolado), ``dinamico`` (conteúdo
-dinâmico e regras), ``erros_sandbox`` (tradução dos erros do executor) e ``teste_bloco`` (teste isolado de um bloco).
+e escopo), ``passos_simples`` (blocos internos, variáveis e a ida ao executor isolado), ``lote`` (um "Para cada" cujo corpo
+é só um passo Python roda todas as iterações em um único contêiner), ``dinamico`` (conteúdo dinâmico e regras),
+``erros_sandbox`` (tradução dos erros do executor) e ``teste_bloco`` (teste isolado de um bloco).
 """
 
 from __future__ import annotations

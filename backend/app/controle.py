@@ -14,6 +14,7 @@ from .dinamico import avaliar_regras, montar_entradas
 from .errors import ErroBloco
 from .execucao import Execucao, Resultado, ResultadoLista
 from .historico import Historico
+from .lote import LoteDePython
 from .models import BlockType, Passo
 from .validation import parametros_efetivos
 
@@ -45,10 +46,15 @@ def motivo_ignorado(p: Passo, anterior_nome: str, situacao: str) -> str:
 
 
 class Controle:
-    def __init__(self, historico: Historico, limites: Limites, executar_passo: ExecutarPasso) -> None:
+    def __init__(self, historico: Historico, limites: Limites, executar_passo: ExecutarPasso,
+                 lote: LoteDePython | None = None) -> None:
         self.historico = historico
         self.limites = limites
         self.executar_passo = executar_passo
+        self.lote = lote
+        # Interruptor interno: False força o caminho de sempre (um passo, um contêiner, por iteração). Os testes de
+        # equivalência rodam cada fluxo com os dois e comparam o histórico.
+        self.usar_lote = True
 
     # ----------------------------------------------------------------- sequência
     def lista(self, ex: Execucao, passos: list[Passo], iteracao: tuple[int, ...]) -> ResultadoLista:
@@ -142,16 +148,26 @@ class Controle:
             for f in corpo:
                 self.ignorar(ex, f, iteracao, f"A lista de “{nome}” está vazia.")
         falhas: list[dict[str, Any]] = []
-        for i, item in enumerate(lista):
-            ex.checar_cancelamento()
-            ex.valores[passo.id] = {"item": item, "indice": i}
-            falhas = self.lista(ex, corpo, (*iteracao, i)).falhas
-            if falhas:
-                logs.append({"source": "system", "text": f"O item {i + 1} de {len(lista)} falhou; as repetições seguintes foram canceladas."})
-                break
+        em_lote = self.lote.rodar(ex, passo, corpo, lista, iteracao, self.lista) if self.lote and self.usar_lote else None
+        if em_lote is not None:
+            falhas = em_lote.falhas
+            if em_lote.item_que_falhou is not None:
+                self._avisar_falha_do_item(logs, em_lote.item_que_falhou, len(lista))
+        else:
+            for i, item in enumerate(lista):
+                ex.checar_cancelamento()
+                ex.valores[passo.id] = {"item": item, "indice": i}
+                falhas = self.lista(ex, corpo, (*iteracao, i)).falhas
+                if falhas:
+                    self._avisar_falha_do_item(logs, i, len(lista))
+                    break
         saidas = {"quantidade": len(lista)}
         ex.valores[passo.id] = saidas
         return saidas, falhas
+
+    @staticmethod
+    def _avisar_falha_do_item(logs: list[dict[str, str]], posicao: int, total: int) -> None:
+        logs.append({"source": "system", "text": f"O item {posicao + 1} de {total} falhou; as repetições seguintes foram canceladas."})
 
     def _repetir_ate(self, ex: Execucao, passo: Passo, params: dict[str, Any],
                      iteracao: tuple[int, ...]) -> tuple[dict[str, Any], list[dict[str, Any]]]:

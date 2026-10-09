@@ -20,7 +20,7 @@ from .execucao import Cancelado, Encerrado, Execucao
 from .historico import Historico
 from .models import BlockType, Passo
 from .passos import definicao_efetiva
-from .sandbox import DockerExecutor
+from .sandbox import AoItem, Desfecho, DockerExecutor
 from .tipos import descrever_valor, rotulo_tipo, validar_json_puro, valor_e_do_tipo
 from .validation import parametros_efetivos
 
@@ -79,7 +79,9 @@ class PassosSimples:
             limites = dataclasses.replace(self.limites, tempo_s=min(passo.settings.timeout_s, self.limites.tempo_s))
         if tipo.kind == "python" or tipo.id == "builtin.python":
             codigo = ef.code if tipo.id == "builtin.python" else tipo.code
-            r = self.executor.run("block", codigo or "", entradas, {} if tipo.id == "builtin.python" else params, limits=limites)
+            r = ex.resultados_prontos.pop(passo.id, None)  # o lote do laço já rodou este item, junto com os outros
+            if r is None:
+                r = self.executor.run("block", codigo or "", entradas, {} if tipo.id == "builtin.python" else params, limits=limites)
             ctx.logs.extend(r.logs)
             if not r.ok:
                 raise erro_da_sandbox(r.error or {})
@@ -96,6 +98,22 @@ class PassosSimples:
             bruto = HANDLERS[tipo.id](entradas, params, ctx)
         tipos_saida = ex.port_types.get(passo.id, {}).get("outputs", {})
         return self._validar_saidas(ef, bruto, tipos_saida)
+
+    def lote_disponivel(self) -> bool:
+        """O executor isolado está de pé e roda um laço inteiro em um contêiner só?"""
+        status = self.executor.status()
+        return status.disponivel and status.lote
+
+    def executar_lote(self, ex: Execucao, passo: Passo, tipo: BlockType, entradas: list[dict[str, Any]], ao_item: AoItem) -> Desfecho:
+        """Roda o passo Python de um laço para todos os itens em UM contêiner. ``entradas`` traz as de cada item, em ordem.
+
+        Cada resultado chega a ``ao_item`` assim que o item termina. Os limites são os do padrão, por item: um passo com
+        tentativas ou tempo próprio nunca vem para cá."""
+        ef = definicao_efetiva(tipo, passo.params)
+        embutido = tipo.id == "builtin.python"
+        codigo = ef.code if embutido else tipo.code
+        params = {} if embutido else parametros_efetivos(tipo, passo.params)
+        return self.executor.run_lote(codigo or "", entradas, params, self.limites, cancelar=ex.cancelar, ao_item=ao_item)
 
     def _variavel(self, ex: Execucao, passo: Passo, tipo: BlockType, entradas: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         if tipo.id == "builtin.var_inicializar":
