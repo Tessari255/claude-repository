@@ -32,6 +32,8 @@ SUGESTOES = {
     "excecao": "Revise o código do passo. Os logs e os detalhes técnicos mostram onde ele parou.",
     "sintaxe": "Confira parênteses, dois-pontos (:) e a indentação perto da linha indicada.",
     "tempo_esgotado": "Procure laços sem fim (como `while True`) ou reduza a quantidade de dados processados.",
+    # O tempo de UM item não estourou: foi a soma dos itens de um Para cada em lote que passou do teto do lote.
+    "tempo_do_lote": "Deixe o código mais rápido, repita para menos itens ou aumente TRAMA_BATCH_TIMEOUT_S, o tempo total de um laço de Python.",
     "memoria_excedida": "Evite criar listas ou textos enormes; processe menos dados de uma vez.",
     "saida_excessiva": "Reduza o uso de print() e o tamanho do que o código imprime.",
     "retorno_invalido": "Devolva um dicionário com exatamente as saídas declaradas, por exemplo: return {\"mensagem\": texto}.",
@@ -67,5 +69,6 @@ def erro_da_sandbox(err: dict[str, Any], quando: str = "") -> ErroBloco:
     else:
         mensagem = bruto or "Ocorreu um erro inesperado ao executar o código."
     tecnico = {k: err.get(k) for k in ("type", "message", "line", "snippet", "traceback", "item_index") if err.get(k) not in (None, "")}
+    chave_da_sugestao = "tempo_do_lote" if categoria == "tempo_esgotado" and tipo == "TempoDoLote" else categoria
     return ErroBloco(mensagem, codigo=_CODIGOS.get(categoria, categoria),
-                     sugestao=err.get("suggestion") or SUGESTOES.get(categoria), tecnico=tecnico or None)
+                     sugestao=err.get("suggestion") or SUGESTOES.get(chave_da_sugestao), tecnico=tecnico or None)

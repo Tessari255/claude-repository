@@ -89,6 +89,16 @@ def test_sintaxe_tempo_esgotado_e_memoria_ganham_sugestao_propria():
     assert memoria.mensagem == "Memória acabou (linha 7)" and "listas ou textos enormes" in (memoria.sugestao or "")
 
 
+def test_tempo_total_do_lote_estourado_sugere_menos_itens_ou_mais_tempo_e_nao_um_laco_sem_fim():
+    e = erro_da_sandbox({"category": "tempo_esgotado", "type": "TempoDoLote", "line": 3, "snippet": "time.sleep(1)",
+                         "message": "O tempo total do laço (2 s, somando todos os itens) foi excedido."})
+    assert e.codigo == "tempo_esgotado"
+    assert e.mensagem == "O tempo total do laço (2 s, somando todos os itens) foi excedido (o código estava na linha 3: `time.sleep(1)`)."
+    assert e.sugestao is not None and "TRAMA_BATCH_TIMEOUT_S" in e.sugestao and "while True" not in e.sugestao
+    do_item = erro_da_sandbox({"category": "tempo_esgotado", "type": "TempoEsgotado", "message": "O tempo máximo de 4 s foi excedido."})
+    assert do_item.sugestao is not None and "while True" in do_item.sugestao  # o tempo de UM item continua com a sugestão de sempre
+
+
 def test_sugestao_vinda_do_executor_vence_a_padrao_e_categoria_desconhecida_vira_codigo_proprio():
     e = erro_da_sandbox({"category": "retorno_invalido", "message": "Faltou a saída.", "suggestion": "Inclua a saída."})
     assert (e.mensagem, e.codigo, e.sugestao) == ("Faltou a saída.", "retorno_invalido", "Inclua a saída.")

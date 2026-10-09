@@ -10,6 +10,10 @@ RUN python -m pip uninstall -y pip setuptools wheel >/dev/null 2>&1 || true
 COPY runner.py /opt/trama/runner.py
 RUN chmod 0555 /opt/trama && chmod 0444 /opt/trama/runner.py
 
+# Avisa à API que este runner entende o modo `batch` (um laço inteiro em um único contêiner). Uma imagem antiga, sem o
+# rótulo, continua funcionando: a API só não usa o lote com ela.
+LABEL trama.runner.lote="1"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \

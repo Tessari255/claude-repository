@@ -19,6 +19,10 @@ sai do pool para sempre e é removido ao terminar. Os limites do trabalho (tempo
 ele chega; até lá o contêiner ocioso se mata sozinho em ``pool_ocioso_s`` (e logo que a API morre).
 Teto de contêineres vivos: no máximo 4 de trabalho (``max_paralelo``) + ``pool`` ociosos ou subindo.
 
+Lote (``run_lote``): um laço cujo corpo é só um passo Python roda todas as iterações em UM contêiner, com os mesmos limites
+POR ITEM (tempo, memória, logs, tamanho do resultado) e um teto de tempo e de bytes para o lote. É um único trabalho, então a regra
+continua valendo; ele sempre usa um contêiner novo, nunca o do pool, porque o limite de CPU do ocioso é o de UM trabalho.
+
 Se o Docker ou a imagem não estiverem disponíveis, ``status()`` informa o motivo e
 ``run()`` falha de forma explícita — nunca há execução sem isolamento como alternativa.
 """
@@ -26,6 +30,7 @@ Se o Docker ou a imagem não estiverem disponíveis, ``status()`` informa o moti
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import re
@@ -36,9 +41,10 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, TypeGuard
+from typing import Any, Literal, TypeGuard
 
 from ..config import Limites
+from .lote import AoItem, EntregaDoLote, LeitorDeLote, corpo_max_do_lote, tempo_do_lote
 from .pool import Aquecido, PoolAquecido
 
 log = logging.getLogger("trama.sandbox")
@@ -50,6 +56,7 @@ ROTULO = "trama.executor=1"
 ROTULO_POOL = "trama.executor=pool"
 CHAVE_ROTULO = "trama.executor"
 PRONTO = b"PRONTO"
+ROTULO_LOTE = "trama.runner.lote"  # rótulo da imagem (executor/Dockerfile): o runner entende o modo `batch`
 PARTIDA_MAX_S = 30.0  # quanto esperar um contêiner do pool avisar que subiu
 
 # PID 1 de um contêiner do pool (constante nossa, sem dado do usuário). Espera a linha de partida do host
@@ -90,6 +97,8 @@ class ExecutorStatus:
     mensagem: str | None = None
     instrucao: str | None = None
     docker_versao: str | None = None
+    # A imagem traz um runner que entende o modo lote. Uma imagem antiga funciona, só que sem o lote (cada item, um contêiner).
+    lote: bool = False
 
     def como_dict(self) -> dict[str, Any]:
         return {
@@ -130,6 +139,59 @@ def _erro(categoria: str, mensagem: str, **extra: Any) -> dict[str, Any]:
             "line": None, "snippet": None, "traceback": ""}
     base.update(extra)
     return base
+
+
+def _trabalho(token: str, mode: str, code: str, inputs: dict | None, params: dict | None, items: list | None,
+              limites: Limites) -> dict[str, Any]:
+    """O trabalho que o runner lê no stdin."""
+    return {
+        "token": token, "mode": mode, "code": code,
+        "inputs": inputs or {}, "params": params or {}, "items": items or [],
+        "limits": {
+            "time_s": limites.tempo_s, "memory_mb": limites.memoria_mb,
+            "logs_max": limites.logs_max, "result_max": limites.valor_max,
+            "rlimit_as": limites.rlimit_as,
+        },
+    }
+
+
+def _serializar(trabalho: dict[str, Any]) -> bytes:
+    return json.dumps(trabalho, ensure_ascii=True).encode("ascii")  # ASCII puro: sem surrogates nem separadores Unicode
+
+
+def _grande_demais(limites: Limites) -> SandboxResult:
+    return SandboxResult(False, error=_erro(
+        "valor_grande_demais",
+        f"Os dados enviados ao código são grandes demais (limite de {limites.valor_max * 4 // 1024} KB)."))
+
+
+def _tem_rotulo_de_lote(saida: str) -> bool:
+    try:
+        rotulos = json.loads(saida)
+    except ValueError:
+        return False
+    return isinstance(rotulos, dict) and rotulos.get(ROTULO_LOTE) == "1"
+
+
+def _drenar(fluxo, destino: bytearray, teto: int, estourou: threading.Event) -> None:
+    """Lê o fluxo do contêiner até o fim, guardando no máximo ``teto`` bytes em ``destino`` (o resto é jogado fora e acusado).
+
+    ``read1`` devolve o que já chegou em vez de esperar os 64 KB: é o que deixa o lote entregar cada item assim que ele termina."""
+    try:
+        while True:
+            pedaco = fluxo.read1(65536)
+            if not pedaco:
+                return
+            livre = teto - len(destino)
+            if livre > 0:
+                destino.extend(pedaco[:livre])
+            if len(pedaco) > livre:
+                estourou.set()
+    except (OSError, ValueError):
+        return
+
+
+Desfecho = Literal["concluido", "parado", "cancelado"]
 
 
 class _NaoEntregue(Exception):
@@ -184,7 +246,7 @@ class DockerExecutor:
         base.docker_versao = versao.stdout.strip()
         try:
             imagem = subprocess.run(
-                [self.docker_bin, "image", "inspect", self.imagem],
+                [self.docker_bin, "image", "inspect", "--format", "{{json .Config.Labels}}", self.imagem],
                 capture_output=True, text=True, timeout=10,
             )
         except (subprocess.TimeoutExpired, OSError):
@@ -195,6 +257,7 @@ class DockerExecutor:
             base.instrucao = "Rode `./scripts/build-executor.sh` (ou `make executor`) e recarregue a página."
             return base
         base.disponivel = True
+        base.lote = _tem_rotulo_de_lote(imagem.stdout)
         return base
 
     # ----------------------------------------------------------------- limpeza
@@ -282,21 +345,9 @@ class DockerExecutor:
                 suggestion=status.instrucao))
 
         token = secrets.token_hex(12)
-        trabalho = {
-            "token": token, "mode": mode, "code": code,
-            "inputs": inputs or {}, "params": params or {}, "items": items or [],
-            "limits": {
-                "time_s": limites.tempo_s, "memory_mb": limites.memoria_mb,
-                "logs_max": limites.logs_max, "result_max": limites.valor_max,
-                "rlimit_as": limites.rlimit_as,
-            },
-        }
-        corpo = json.dumps(trabalho, ensure_ascii=True).encode("ascii")  # ASCII puro: sem surrogates nem separadores Unicode
-        tamanho_max = limites.valor_max * 4
-        if len(corpo) > tamanho_max:
-            return SandboxResult(False, error=_erro(
-                "valor_grande_demais",
-                f"Os dados enviados ao código são grandes demais (limite de {tamanho_max // 1024} KB)."))
+        corpo = _serializar(_trabalho(token, mode, code, inputs, params, items, limites))
+        if len(corpo) > limites.valor_max * 4:
+            return _grande_demais(limites)
 
         with self._semaforo:
             aquecido = self._retirar_aquecido(limites)
@@ -312,6 +363,190 @@ class DockerExecutor:
                 return self._rodar(corpo, token, limites, nome)
             finally:
                 self._remover(nome)  # sem --rm: o contêiner precisa existir até lermos o motivo do encerramento
+
+    # ------------------------------------------------------------------- lote
+    def run_lote(self, code: str, itens: list[dict], params: dict | None = None, limits: Limites | None = None, *,
+                 cancelar: threading.Event | None = None, ao_item: AoItem) -> Desfecho:
+        """Roda a função ``run`` de ``code`` uma vez por elemento de ``itens`` (as entradas de cada iteração), em ordem e em UM contêiner.
+
+        Cada item tem os limites de ``limits`` por conta própria (tempo, memória, logs, tamanho do resultado) e o lote tem um
+        teto de tempo (``tempo_do_lote``) e de bytes (``corpo_max_do_lote``). ``ao_item(posição, resultado)`` é chamada, na
+        thread de quem chamou, assim que cada item termina, com o mesmo ``SandboxResult`` que ``run("block", ...)`` daria
+        para ele; devolve False para parar o lote (o contêiner é abatido). O primeiro item que falha encerra o lote, e tudo o que
+        o host constata sobre o item em andamento (tempo esgotado, contêiner abatido, entradas grandes demais) chega do mesmo
+        jeito, como o resultado dele. ``cancelar`` abate o contêiner na hora. Exceções de ``ao_item`` abatem o contêiner e sobem.
+
+        Devolve ``concluido`` (o lote terminou: todos os itens, ou até a primeira falha), ``parado`` ou ``cancelado``.
+        Nunca usa o pool: o limite de CPU de um contêiner ocioso é o de UM trabalho, e o lote precisa do de todos os itens."""
+        limites = limits or self.limites
+        status = self.status()
+        if not status.disponivel or not status.lote:
+            motivo = (status.mensagem if not status.disponivel else
+                      f"A imagem do executor ({self.imagem}) é antiga e não roda um laço de uma vez.")
+            instrucao = status.instrucao if not status.disponivel else "Rode `./scripts/build-executor.sh` (ou `make executor`)."
+            ao_item(0, SandboxResult(False, error=_erro("executor_indisponivel", motivo or "O executor isolado não está disponível.",
+                                                         suggestion=instrucao)))
+            return "concluido"
+        if not itens:
+            return "concluido"
+        if cancelar is not None and cancelar.is_set():
+            return "cancelado"
+
+        token = secrets.token_hex(12)
+        # Um item que sozinho passaria do limite de um trabalho avulso falha como falharia avulso; os anteriores rodam antes dele.
+        base = len(_serializar(_trabalho(token, "block", code, None, params, None, limites))) - len("{}")
+        enviar: list[dict] = []
+        soma = 0
+        grande: SandboxResult | None = None
+        for item in itens:
+            tamanho = len(json.dumps(item, ensure_ascii=True))
+            if base + tamanho > limites.valor_max * 4:
+                grande = _grande_demais(limites)
+                break
+            soma += tamanho
+            if soma > corpo_max_do_lote(limites):
+                grande = SandboxResult(False, error=_erro(
+                    "valor_grande_demais",
+                    f"As entradas de todos os itens juntas são grandes demais para rodar em lote (limite de {corpo_max_do_lote(limites) // 1024} KB)."))
+                break
+            enviar.append(item)
+
+        desfecho: Desfecho = "concluido"
+        completo = True
+        if enviar:
+            total_s = tempo_do_lote(limites, len(enviar))
+            trabalho = _trabalho(token, "batch", code, None, params, enviar, limites)
+            trabalho["limits"]["batch_time_s"] = total_s
+            with self._semaforo:
+                desfecho, entrega = self._lote_em_conteiner(_serializar(trabalho), token, len(enviar), limites, total_s, cancelar, ao_item)
+            completo = desfecho == "concluido" and not entrega.falhou
+        if grande is not None and completo:
+            ao_item(len(enviar), grande)
+        return desfecho
+
+    def _lote_em_conteiner(self, corpo: bytes, token: str, itens: int, limites: Limites, total_s: float,
+                           cancelar: threading.Event | None, ao_item: AoItem) -> tuple[Desfecho, EntregaDoLote]:
+        nome = f"trama-{uuid.uuid4().hex[:12]}"
+        entrega = EntregaDoLote(itens, ao_item, lambda resposta, ms: self._converter(resposta, ms, limites))
+        try:
+            return self._rodar_lote(corpo, token, limites, total_s, nome, entrega, cancelar), entrega
+        finally:
+            self._remover(nome)  # sem --rm: o contêiner precisa existir até lermos o motivo do encerramento
+
+    def _rodar_lote(self, corpo: bytes, token: str, limites: Limites, total_s: float, nome: str, entrega: EntregaDoLote,
+                    cancelar: threading.Event | None) -> Desfecho:
+        # O contêiner vive o tempo do lote inteiro (vigia e CPU), mas cada item é vigiado pelo tempo de UM item.
+        limites_lote = dataclasses.replace(limites, tempo_s=total_s)
+        cap_stdout = 6 * (limites.valor_max + limites.logs_max) + 65536  # o que um item pode escrever, como no trabalho avulso
+        saida, erro_bytes = bytearray(), bytearray()
+        estourou = threading.Event()
+        inicio = time.monotonic()
+        entrega.marco = inicio
+        try:
+            proc = subprocess.Popen(self._comando(nome, limites_lote),
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as exc:
+            log.error("Falha ao iniciar o docker: %s", exc)
+            entrega.entregar(SandboxResult(False, error=_erro(
+                "executor_indisponivel", "Não foi possível iniciar o executor isolado.")))
+            return "concluido"
+        entrada = proc.stdin
+        assert entrada is not None  # Popen com stdin=PIPE
+
+        def escrever() -> None:
+            try:
+                entrada.write(corpo)
+                entrada.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass  # o contêiner já morreu: o que aconteceu com o item em andamento aparece pelo código de saída
+
+        threads = [
+            threading.Thread(target=escrever, daemon=True),
+            threading.Thread(target=_drenar, args=(proc.stdout, saida, cap_stdout, estourou), daemon=True),
+            threading.Thread(target=_drenar, args=(proc.stderr, erro_bytes, 65536, estourou), daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        leitor = LeitorDeLote(PREFIXO, token)
+        ruido = 0  # bytes que não eram resposta do runner desde a última entrega
+        desfecho: Desfecho = "concluido"
+        motivo: str | None = None
+        try:
+            while True:
+                try:
+                    proc.wait(timeout=0.05)
+                    terminou = True
+                    for t in threads:
+                        t.join(timeout=2)
+                except subprocess.TimeoutExpired:
+                    terminou = False
+                entregues = entrega.entregues
+                linhas, descartado = leitor.ler(saida)
+                ruido += descartado
+                for linha in linhas:
+                    entrega.aceitar(linha)
+                if entrega.entregues > entregues:
+                    ruido = 0
+                if entrega.parado:
+                    desfecho = "parado"
+                    break
+                if terminou:
+                    break
+                if cancelar is not None and cancelar.is_set():
+                    desfecho = "cancelado"
+                    break
+                agora = time.monotonic()
+                if estourou.is_set() or ruido + len(saida) > cap_stdout:
+                    motivo = "saida_excessiva"
+                elif agora - entrega.marco > limites.tempo_s + limites.folga_inicio_s:
+                    motivo = "tempo_esgotado"
+                elif agora - inicio > total_s + limites.folga_inicio_s:
+                    motivo = "tempo_do_lote"
+                if motivo:
+                    break
+        except BaseException:
+            self._abater(nome, proc)
+            raise
+
+        if desfecho != "concluido" or motivo:
+            self._abater(nome, proc)
+        for t in threads:
+            t.join(timeout=2)
+        if desfecho == "concluido":
+            # o que o runner escreveu antes de terminar (ou de ser abatido) vale; o que deu errado é do item que ficou sem resposta
+            linhas, _ = leitor.ler(saida)
+            for linha in linhas:
+                entrega.aceitar(linha)
+            if entrega.parado:
+                desfecho = "parado"
+            elif entrega.aberto:
+                entrega.entregar(self._falha_do_lote(motivo, nome, proc, erro_bytes, entrega, limites, limites_lote))
+        return desfecho
+
+    def _falha_do_lote(self, motivo: str | None, nome: str, proc: subprocess.Popen, erro_bytes: bytearray,
+                       entrega: EntregaDoLote, limites: Limites, limites_lote: Limites) -> SandboxResult:
+        """O resultado do item que ficou sem resposta: o que o host constatou (tempo, saída) ou como o contêiner terminou."""
+        duracao = int((time.monotonic() - entrega.marco) * 1000)
+        if motivo == "tempo_esgotado":
+            return SandboxResult(False, duration_ms=duracao, error=_erro(
+                "tempo_esgotado",
+                f"O tempo máximo de {limites.tempo_s:g} s foi excedido e a execução foi encerrada.",
+                suggestion="Verifique se há um laço infinito (while True) ou reduza a quantidade de dados."))
+        if motivo == "tempo_do_lote":
+            return SandboxResult(False, duration_ms=duracao, error=_erro(
+                "tempo_esgotado",
+                f"O tempo total do laço ({limites_lote.tempo_s:g} s, somando todos os itens) foi excedido e a execução foi encerrada.",
+                type="TempoDoLote"))
+        if motivo == "saida_excessiva":
+            return SandboxResult(False, duration_ms=duracao, error=_erro(
+                "saida_excessiva",
+                "O código gerou mais saída do que o permitido e foi encerrado.",
+                suggestion="Reduza o uso de print() e o tamanho dos dados devolvidos."))
+        if entrega.fim:  # o runner disse que acabou, mas faltou o resultado deste item
+            return SandboxResult(False, duration_ms=duracao, error=_erro(
+                "erro_interno", "O executor terminou de forma inesperada, sem devolver resultado."))
+        return self._sem_resposta(nome, proc.returncode, erro_bytes, duracao, limites_lote)
 
     # ------------------------------------------------------------------- pool
     def aquecer(self) -> None:
@@ -397,21 +632,6 @@ class DockerExecutor:
         cap_stderr = 65536
         saida, erro_bytes = bytearray(), bytearray()
         estourou = threading.Event()
-
-        def drenar(fluxo, destino: bytearray, teto: int) -> None:
-            try:
-                while True:
-                    pedaco = fluxo.read(65536)
-                    if not pedaco:
-                        return
-                    livre = teto - len(destino)
-                    if livre > 0:
-                        destino.extend(pedaco[:livre])
-                    if len(pedaco) > livre:
-                        estourou.set()
-            except (OSError, ValueError):
-                return
-
         inicio = time.monotonic()  # o tempo de parede do trabalho conta daqui, não de quando o contêiner ocioso subiu
         envio = corpo
         if aquecido is None:
@@ -442,8 +662,8 @@ class DockerExecutor:
 
         threads = [
             threading.Thread(target=escrever, daemon=True),
-            threading.Thread(target=drenar, args=(proc.stdout, saida, cap_stdout), daemon=True),
-            threading.Thread(target=drenar, args=(proc.stderr, erro_bytes, cap_stderr), daemon=True),
+            threading.Thread(target=_drenar, args=(proc.stdout, saida, cap_stdout, estourou), daemon=True),
+            threading.Thread(target=_drenar, args=(proc.stderr, erro_bytes, cap_stderr, estourou), daemon=True),
         ]
         for t in threads:
             t.start()
@@ -495,8 +715,11 @@ class DockerExecutor:
             if isinstance(resposta, dict):
                 return self._converter(resposta, duracao, limites)
 
+        return self._sem_resposta(nome, proc.returncode, erro_bytes, duracao, limites)
+
+    def _sem_resposta(self, nome: str, codigo: int | None, erro_bytes: bytearray, duracao: int, limites: Limites) -> SandboxResult:
+        """O contêiner terminou sem devolver a resposta do runner: o motivo vem do código de saída (e do OOM do cgroup)."""
         stderr_texto = limpar_segredos(erro_bytes.decode("utf-8", "replace")).strip()
-        codigo = proc.returncode
         log.warning("Executor terminou sem resultado (código %s): %s", codigo, stderr_texto[-500:])
         if codigo == 137 and self._oom(nome):
             return SandboxResult(False, duration_ms=duracao, error=_erro(

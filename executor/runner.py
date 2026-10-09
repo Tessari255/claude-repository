@@ -7,12 +7,30 @@ Protocolo
 ---------
 * stdin : um único JSON com o trabalho
           ``{token, mode, code, inputs, params, items, limits}``.
-          ``mode`` é ``block`` (chama run), ``map`` (chama transformar em cada item)
-          ou ``check`` (carrega o código como na execução real e confere a função).
+          ``mode`` é ``block`` (chama run), ``map`` (chama transformar em cada item),
+          ``check`` (carrega o código como na execução real e confere a função)
+          ou ``batch`` (chama run uma vez por elemento de ``items``, em ordem).
 * stdout: texto livre do código do usuário que escape da captura (ex.: escrita
           direta no descritor 1) e, na última linha, a resposta do runner no
           formato  ``<PREFIXO><token><json>``.  O token é aleatório por execução
           e só serve para o host distinguir a linha do runner de ruído.
+          No modo ``batch`` há UMA linha dessas por item, escrita assim que o item
+          termina (``{"i": posição, "ok": ..., ...}``), e uma última ``{"fim": true}``;
+          o primeiro item que falha encerra o lote.
+
+Modo batch: o que vale por item e o que vaza entre itens
+--------------------------------------------------------
+Cada item é uma chamada separada de ``run`` no MESMO processo. Valem POR ITEM, como num
+contêiner só dele: o tempo (``time_s``), o teto de logs, o tamanho do resultado, a
+captura de stdout/stderr e o módulo do usuário, que é executado do zero (variáveis globais,
+funções e classes definidas por ele não passam de um item para o outro). ``params`` chega
+como uma cópia nova a cada item e o ``/tmp`` é esvaziado entre os itens. O lote ainda tem
+um tempo total (``batch_time_s``).
+O que NÃO é refeito entre itens, porque pertence ao processo e não ao módulo do usuário:
+o estado global da biblioteca padrão (por exemplo a semente do ``random``, a precisão do
+``decimal``, o que o código atribuir a atributos de módulos como ``math`` ou ``json``) e os
+módulos já importados. Código que depende de começar sempre "limpo" nesse sentido precisa
+ajustar esse estado ele mesmo, dentro de ``run``.
 
 Importante: a barreira de segurança é o contêiner (ver ``DockerExecutor``).
 A lista de bibliotecas permitidas abaixo é uma camada extra de usabilidade
@@ -20,9 +38,12 @@ A lista de bibliotecas permitidas abaixo é uma camada extra de usabilidade
 """
 
 import builtins
+import gc
 import inspect
 import json
+import os
 import resource
+import shutil
 import signal
 import sys
 import time
@@ -236,10 +257,12 @@ def _aceita_dois(funcao):
     return len(posicionais) >= 2 or any(p.kind == p.VAR_POSITIONAL for p in parametros)
 
 
-def _carregar(codigo, nome):
-    """Compila e executa o código do módulo (como na execução real) e devolve a função pedida."""
+def _carregar(codigo, nome, compilar=None):
+    """Compila e executa o código do módulo (como na execução real) e devolve a função pedida.
+
+    ``compilar`` devolve o código já compilado: o lote compila uma vez e executa o módulo do zero a cada item."""
     ambiente = {"__name__": "__bloco__", "__builtins__": _builtins_do_usuario()}
-    exec(compile(codigo, ARQUIVO, "exec"), ambiente)
+    exec(compilar() if compilar else compile(codigo, ARQUIVO, "exec"), ambiente)
     funcao = ambiente.get(nome)
     if not callable(funcao):
         raise NameError(
@@ -250,10 +273,10 @@ def _carregar(codigo, nome):
     return funcao
 
 
-def _executar(trabalho, codigo, limites, linhas):
+def _executar(trabalho, codigo, limites, linhas, compilar=None):
     """Executa o código do usuário e devolve o payload (dict) ou levanta uma exceção."""
     modo = trabalho.get("mode", "block")
-    funcao = _carregar(codigo, "transformar" if modo == "map" else "run")
+    funcao = _carregar(codigo, "transformar" if modo == "map" else "run", compilar)
     if modo == "check":
         if not _aceita_dois(funcao):
             linha = getattr(getattr(funcao, "__code__", None), "co_firstlineno", None)
@@ -284,6 +307,128 @@ def _executar(trabalho, codigo, limites, linhas):
     return json.loads(texto)
 
 
+def _rodar_trabalho(trabalho, codigo, limites, linhas, logs, tempo_s, memoria_mb, compilar=None, tempo_do_lote=None):
+    """Executa um trabalho (ou um item do lote) com stdout/stderr capturados e o aviso de tempo armado.
+
+    Devolve a resposta do runner, com os logs. ``tempo_do_lote`` só vale quando o tempo que restava do lote é menor
+    que o de um item: se o aviso disparar, a mensagem diz que foi o tempo total que acabou."""
+    stdout_real, stderr_real = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = Fluxo(logs, "stdout"), Fluxo(logs, "stderr")
+    # re-arma a cada 250 ms: um `except BaseException` que engole o aviso é interrompido de novo
+    signal.setitimer(signal.ITIMER_REAL, max(tempo_s, 0.05), 0.25)
+    inicio = time.monotonic()
+    try:
+        payload = _executar(trabalho, codigo, limites, linhas, compilar)
+        resposta = {"ok": True, "payload": payload,
+                    "duration_ms": int((time.monotonic() - inicio) * 1000)}
+    except TempoEsgotado as exc:
+        info = _descrever(exc, linhas, "tempo_esgotado")
+        if tempo_do_lote is None:
+            info["message"] = "O tempo máximo de %g s foi excedido." % tempo_s
+        else:
+            info["type"] = "TempoDoLote"
+            info["message"] = _mensagem_tempo_do_lote(tempo_do_lote)
+        resposta = {"ok": False, "error": info}
+    except SaidaExcessiva as exc:
+        resposta = {"ok": False, "error": _descrever(exc, linhas, "saida_excessiva")}
+    except MemoryError as exc:
+        info = _descrever(exc, linhas, "memoria_excedida")
+        info["message"] = "O limite de memória (%d MB) foi excedido." % memoria_mb
+        resposta = {"ok": False, "error": info}
+    except RetornoInvalido as exc:
+        resposta = {"ok": False, "error": _descrever(exc, linhas, "retorno_invalido")}
+    except ErroDeContrato as exc:
+        resposta = {"ok": False, "error": _erro_simples(
+            "funcao_ausente", "AssinaturaInvalida", str(exc), exc.linha, exc.trecho)}
+    except ErroNoItem as exc:
+        info = _descrever(exc.original, linhas)
+        info["item_index"] = exc.indice
+        resposta = {"ok": False, "error": info}
+    except NameError as exc:
+        ausente = "def run" in str(exc) or "def transformar" in str(exc)
+        resposta = {"ok": False, "error": _descrever(exc, linhas, "funcao_ausente" if ausente else "excecao")}
+    except BaseException as exc:
+        resposta = {"ok": False, "error": _descrever(exc, linhas)}
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        sys.stdout, sys.stderr = stdout_real, stderr_real
+    resposta["logs"] = logs.pedacos
+    return resposta
+
+
+def _mensagem_tempo_do_lote(tempo_do_lote):
+    return ("O tempo total do laço (%g s, somando todos os itens) foi excedido; o item em andamento foi interrompido."
+            % tempo_do_lote)
+
+
+def _limpar_tmp():
+    """Esvazia /tmp (a única pasta gravável do contêiner), para o próximo item começar como num contêiner novo."""
+    try:
+        presentes = list(os.scandir("/tmp"))
+    except OSError:
+        return
+    for entrada in presentes:
+        try:
+            if entrada.is_dir(follow_symlinks=False):
+                shutil.rmtree(entrada.path, ignore_errors=True)
+            else:
+                os.unlink(entrada.path)
+        except OSError:
+            pass
+
+
+def _executar_lote(token, trabalho, codigo, limites, linhas, memoria_mb):
+    """Modo ``batch``: chama ``run`` uma vez por item, na ordem, e escreve a resposta de cada item assim que ele termina.
+
+    O primeiro item que falha encerra o lote (os seguintes nem começam, como num laço que para na primeira falha).
+    A resposta de cada item sai na hora: se o contêiner for abatido no meio, o host já tem o que os itens anteriores devolveram."""
+    itens = trabalho.get("items", [])
+    tempo_item = float(limites.get("time_s", 10))
+    tempo_lote = float(limites.get("batch_time_s", tempo_item * max(len(itens), 1)))
+    logs_max = int(limites.get("logs_max", 64 * 1024))
+    params = json.dumps(trabalho.get("params", {}))
+    compilado = []
+
+    def compilar():
+        # dentro do tempo e da captura do primeiro item: um erro de sintaxe é a falha dele, como no trabalho avulso
+        if not compilado:
+            compilado.append(compile(codigo, ARQUIVO, "exec"))
+        return compilado[0]
+
+    gc.collect()
+    gc.freeze()  # o que o runner já carregou sai das varreduras: o gc.collect() entre itens só olha o que o item criou
+    inicio = time.monotonic()
+    feitos = 0
+    for indice, entradas in enumerate(itens):
+        logs = Logs(logs_max)
+        restante = tempo_lote - (time.monotonic() - inicio)
+        if restante <= 0:
+            resposta = {"ok": False, "logs": [], "error": _erro_simples(
+                "tempo_esgotado", "TempoDoLote", _mensagem_tempo_do_lote(tempo_lote))}
+        else:
+            do_lote = tempo_lote if restante < tempo_item else None
+            item = {"mode": "block", "inputs": entradas, "params": json.loads(params)}
+            try:
+                resposta = _rodar_trabalho(item, codigo, limites, linhas, logs, min(tempo_item, restante), memoria_mb,
+                                           compilar, do_lote)
+            except BaseException as exc:  # o aviso de tempo chegou durante o tratamento de outro erro
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                if isinstance(exc, TempoEsgotado):
+                    erro = _erro_simples("tempo_esgotado", "TempoEsgotado", "O tempo máximo de %g s foi excedido." % tempo_item)
+                else:
+                    erro = {"category": "erro_interno", "type": type(exc).__name__, "message": str(exc)[:500],
+                            "line": None, "snippet": None, "traceback": traceback.format_exc()[-3000:]}
+                resposta = {"ok": False, "logs": logs.pedacos, "error": erro}
+        resposta["i"] = indice
+        _emitir(token, resposta)
+        feitos += 1
+        if not resposta["ok"]:
+            break
+        _limpar_tmp()
+        gc.collect()
+    _emitir(token, {"fim": True, "total": feitos})
+
+
 def main():
     token = ""
     logs = Logs(64 * 1024)
@@ -307,44 +452,11 @@ def main():
         def _estourou(*_):
             raise TempoEsgotado()
 
-        sys.stdout, sys.stderr = Fluxo(logs, "stdout"), Fluxo(logs, "stderr")
         signal.signal(signal.SIGALRM, _estourou)
-        # re-arma a cada 250 ms: um `except BaseException` que engole o aviso é interrompido de novo
-        signal.setitimer(signal.ITIMER_REAL, max(tempo_s, 0.05), 0.25)
-        inicio = time.monotonic()
-        try:
-            payload = _executar(trabalho, codigo, limites, linhas)
-            resposta = {"ok": True, "payload": payload,
-                        "duration_ms": int((time.monotonic() - inicio) * 1000)}
-        except TempoEsgotado as exc:
-            info = _descrever(exc, linhas, "tempo_esgotado")
-            info["message"] = "O tempo máximo de %g s foi excedido." % tempo_s
-            resposta = {"ok": False, "error": info}
-        except SaidaExcessiva as exc:
-            resposta = {"ok": False, "error": _descrever(exc, linhas, "saida_excessiva")}
-        except MemoryError as exc:
-            info = _descrever(exc, linhas, "memoria_excedida")
-            info["message"] = "O limite de memória (%d MB) foi excedido." % memoria_mb
-            resposta = {"ok": False, "error": info}
-        except RetornoInvalido as exc:
-            resposta = {"ok": False, "error": _descrever(exc, linhas, "retorno_invalido")}
-        except ErroDeContrato as exc:
-            resposta = {"ok": False, "error": _erro_simples(
-                "funcao_ausente", "AssinaturaInvalida", str(exc), exc.linha, exc.trecho)}
-        except ErroNoItem as exc:
-            info = _descrever(exc.original, linhas)
-            info["item_index"] = exc.indice
-            resposta = {"ok": False, "error": info}
-        except NameError as exc:
-            ausente = "def run" in str(exc) or "def transformar" in str(exc)
-            resposta = {"ok": False, "error": _descrever(exc, linhas, "funcao_ausente" if ausente else "excecao")}
-        except BaseException as exc:
-            resposta = {"ok": False, "error": _descrever(exc, linhas)}
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            sys.stdout, sys.stderr = stdout_real, stderr_real
-        resposta["logs"] = logs.pedacos
-        _emitir(token, resposta)
+        if trabalho.get("mode") == "batch":
+            _executar_lote(token, trabalho, codigo, limites, linhas, memoria_mb)
+            return
+        _emitir(token, _rodar_trabalho(trabalho, codigo, limites, linhas, logs, tempo_s, memoria_mb))
     except BaseException as exc:
         signal.setitimer(signal.ITIMER_REAL, 0)
         sys.stdout, sys.stderr = stdout_real, stderr_real
