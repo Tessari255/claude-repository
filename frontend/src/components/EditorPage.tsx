@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import {
   achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
@@ -6,9 +6,9 @@ import {
 } from '../lib/modelo'
 import { useAtalhos } from '../hooks/useAtalhos'
 import { useCatalogo } from '../hooks/useCatalogo'
+import { useExecucao } from '../hooks/useExecucao'
 import { useProjeto } from '../hooks/useProjeto'
 import { useVisaoDeExecucao } from '../hooks/useVisaoDeExecucao'
-import { useVivo } from '../hooks/useVivo'
 import { slugDeId } from '../lib/visual'
 import type { BlockType, Passo, Run } from '../types'
 import { BlockEditorDialog } from './BlockEditorDialog'
@@ -41,40 +41,29 @@ function baixar(nome: string, conteudo: string) {
   URL.revokeObjectURL(url)
 }
 
-const dormir = (ms: number) => new Promise((r) => window.setTimeout(r, ms))
-
 export function EditorPage({ projectId, onSair }: { projectId: string; onSair: () => void }) {
   const notificar = useNotificar()
   const catalogo = useCatalogo()
   const { biblioteca, sistema, defDe, ultimasVersoes } = catalogo
   const visao = useVisaoDeExecucao()
-  const { iteracoes, voltar: voltarAoFluxo } = visao
+  const { iteracoes } = visao
   const somenteLeitura = visao.atual !== null
   const {
     falhaCarga, projeto, nome, setNome, hist, fluxoJson, sujo, salvando, salvar: salvarProjeto, analise, verificando, revalidar, rascunhoAtual,
   } = useProjeto(projectId, catalogo, somenteLeitura)
   const flowAtual = hist.atual
+  const execucao = useExecucao({
+    projectId, projetoCarregado: projeto !== null, rascunhoAtual, revalidar, garantirDefs: catalogo.garantirDefs, visao,
+  })
+  const { run, executando, historicoRuns, testar: testarFluxo } = execucao
   const [selecionadoId, setSelecionadoId] = useState<string | null>(null)
   const [painel, setPainel] = useState<Painel>(null)
   const [destino, setDestino] = useState<Destino | null>(null)
-  const [run, setRun] = useState<Run | null>(null)
-  const [executando, setExecutando] = useState(false)
-  const [historicoRuns, setHistoricoRuns] = useState<Run[]>([])
   const [dialogo, setDialogo] = useState<Dialogo>(null)
   const [iniciarTeste, setIniciarTeste] = useState(false)
 
-  const vivo = useVivo()
-
   const flow = visao.atual?.flow ?? flowAtual
   const runVisivel = visao.atual ? visao.atual.run : run
-
-  const idDoProjeto = projeto?.id
-  useEffect(() => {
-    if (!idDoProjeto) return
-    let cancelado = false
-    api.historico(idDoProjeto).then((h) => !cancelado && setHistoricoRuns(h)).catch(() => undefined)
-    return () => { cancelado = true }
-  }, [idDoProjeto])
 
   const erros = useMemo(() => analise.issues.filter((i) => i.severity === 'erro'), [analise.issues])
   const executorOk = sistema?.executor.disponivel ?? false
@@ -172,59 +161,9 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   }
 
   // -------------------------------------------------------------------------- execução
-  const acompanhar = useCallback(async (id: string) => {
-    let anterior = ''
-    try {
-      while (vivo.current) {
-        const r = await api.execucao(id)
-        setRun(r)
-        const atual = r.steps.find((s) => s.state === 'executando')
-        if (atual && atual.step_id !== anterior) {
-          anterior = atual.step_id
-          const f = rascunhoAtual().flow
-          const p = f ? acharQualquer(f, atual.step_id) : null
-          notificar.anunciar(`Executando ${p ? nomeDoPasso(p, undefined) : 'passo'}.`)
-        }
-        if (['concluido', 'falhou', 'cancelado'].includes(r.state)) {
-          notificar.anunciar(r.state === 'concluido' ? `Teste concluído em ${r.duration_ms} milissegundos.`
-            : r.state === 'cancelado' ? 'A execução foi cancelada.' : `O teste falhou no passo ${r.error?.step_name ?? ''}: ${r.error?.message ?? ''}`)
-          break
-        }
-        await dormir(300)
-      }
-    } catch (e) {
-      notificar.erro('Perdemos o contato com o servidor durante o teste', (e as ApiFailure).message)
-    } finally {
-      if (vivo.current) {
-        setExecutando(false)
-        api.historico(projectId).then((h) => vivo.current && setHistoricoRuns(h)).catch(() => undefined)
-      }
-    }
-  }, [notificar, projectId, vivo, rascunhoAtual])
-
   const testar = useCallback(async (dados?: Record<string, unknown>) => {
-    const { flow: f, projeto: p } = rascunhoAtual()
-    if (!p || !f || executando) return
-    if (f.steps.length === 0) {
-      notificar.info('O fluxo está vazio', 'Adicione ao menos um passo antes de testar.')
-      return
-    }
-    setExecutando(true); setRun(null); voltarAoFluxo()
-    try {
-      const r = await api.executar(p.id, f, dados)
-      setRun(r)
-      notificar.anunciar('Teste iniciado.')
-      void acompanhar(r.id)
-    } catch (e) {
-      const x = e as ApiFailure
-      setExecutando(false)
-      if (x.issues.length && x.code === 'fluxo_invalido') {
-        await revalidar()
-        setPainel('verificador')
-        notificar.erro('O fluxo não foi testado', `${x.issues.length} ${x.issues.length === 1 ? 'problema precisa' : 'problemas precisam'} ser corrigido(s). Veja o verificador de fluxo.`)
-      } else notificar.erro('Não foi possível testar', [x.message, x.issues[0]?.message].filter(Boolean).join(' '))
-    }
-  }, [executando, acompanhar, revalidar, notificar, voltarAoFluxo, rascunhoAtual])
+    if (await testarFluxo(dados) === 'invalido') setPainel('verificador')
+  }, [testarFluxo])
 
   function abrirTeste(iniciar = false) {
     setIniciarTeste(iniciar)
@@ -232,19 +171,10 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     setSelecionadoId(null)
   }
 
-  async function cancelarExecucao() {
-    if (!run) return
-    try { await api.cancelarExecucao(run.id) } catch (e) { notificar.erro('Não foi possível cancelar', (e as ApiFailure).message) }
-  }
-
   async function abrirExecucao(r: Run) {
-    try {
-      const completa = await api.execucaoComFluxo(r.id)
-      await catalogo.garantirDefs(completa.flow)
-      visao.abrir({ run: completa, flow: completa.flow })
-      setSelecionadoId(null)
-      setPainel('historico')
-    } catch (e) { notificar.erro('Não foi possível abrir a execução', (e as ApiFailure).message) }
+    if (!(await execucao.abrirExecucao(r))) return
+    setSelecionadoId(null)
+    setPainel('historico')
   }
 
   function reenviar(r: Run) {
@@ -390,7 +320,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
             <PainelTeste
               campos={camposDoGatilho} run={run} executando={executando} historico={historicoRuns}
               executorMsg={sistema && !sistema.executor.disponivel ? [sistema.executor.mensagem, sistema.executor.instrucao].filter(Boolean).join(' ') : null}
-              onTestar={(d) => void testar(d)} onCancelar={() => void cancelarExecucao()} onFechar={() => setPainel(null)}
+              onTestar={(d) => void testar(d)} onCancelar={() => void execucao.cancelar()} onFechar={() => setPainel(null)}
               onVerNoFluxo={irParaPasso} iniciarAoAbrir={iniciarTeste}
             />
           )}

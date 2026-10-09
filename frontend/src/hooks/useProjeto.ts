@@ -13,6 +13,9 @@ export const ATRASO_REVALIDACAO_MS = 350
 
 export interface Analise { issues: Issue[]; port_types: PortTypes }
 
+/** O que está na tela agora: o fluxo em edição, o nome digitado e o projeto como o servidor o devolveu. */
+export interface Rascunho { flow: Flow | null; nome: string; projeto: Project | null }
+
 /**
  * - `salvo`: gravado, com a revisão nova.
  * - `conflito`: outra aba salvou depois que este fluxo foi aberto; quem chamou decide o que fazer.
@@ -44,7 +47,7 @@ export function useProjeto(projectId: string, catalogo: Catalogo, somenteLeitura
 
   const contadorValidacao = useRef(0)
   // O que está na tela agora, para tarefas assíncronas e ouvintes que não podem depender do fechamento de uma renderização antiga.
-  const estado = useRef({ flow: flowAtual, nome, projeto })
+  const estado = useRef<Rascunho>({ flow: flowAtual, nome, projeto })
   estado.current = { flow: flowAtual, nome, projeto }
   const rascunhoAtual = useCallback(() => estado.current, [])
 

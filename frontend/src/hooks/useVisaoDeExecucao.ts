@@ -20,3 +20,5 @@ export function useVisaoDeExecucao() {
 
   return { atual, iteracoes, abrir, fechar, voltar, escolherIteracao }
 }
+
+export type VisaoDeExecucao = ReturnType<typeof useVisaoDeExecucao>
