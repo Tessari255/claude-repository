@@ -8,16 +8,20 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
+from app.errors import ErroBloco
 from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
+from app.execucao import Cancelado, Execucao, chave_etapa, falha_de
+from app.models import Flow
 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -78,3 +82,27 @@ def test_sugestao_vinda_do_executor_vence_a_padrao_e_categoria_desconhecida_vira
 def test_erros_de_configuracao_nao_sao_repetidos_mas_os_de_execucao_sim():
     assert {"entrada_invalida", "entrada_ausente", "executor_indisponivel", "limite_itens", "registros_demais"} <= NAO_REPETIR
     assert not {"excecao_python", "tempo_esgotado", "erro_interno", "retorno_invalido"} & NAO_REPETIR
+
+
+# ------------------------------------------------------------------ estado de uma execução
+def test_chave_da_etapa_inclui_a_posicao_em_cada_laco():
+    assert chave_etapa("passo", ()) == "passo"
+    assert chave_etapa("passo", (3,)) == "passo@3"
+    assert chave_etapa("passo", (0, 12)) == "passo@0.12"
+
+
+def test_checar_cancelamento_so_interrompe_depois_do_pedido():
+    ex = Execucao(run_id="r", flow=Flow(steps=[]), defs={}, port_types={}, trigger_inputs={}, cancelar=threading.Event())
+    ex.checar_cancelamento()  # ainda não foi pedido
+    ex.cancelar.set()
+    with pytest.raises(Cancelado):
+        ex.checar_cancelamento()
+
+
+def test_falha_de_leva_a_linha_do_erro_tecnico_para_o_nivel_de_cima():
+    erro = ErroBloco("Deu ruim.", codigo="excecao_python", sugestao="Revise.", tecnico={"line": 4, "type": "KeyError"})
+    assert falha_de("p1", "Calcular", erro) == {
+        "step_id": "p1", "step_name": "Calcular", "code": "excecao_python", "message": "Deu ruim.",
+        "suggestion": "Revise.", "line": 4, "technical": {"line": 4, "type": "KeyError"}}
+    sem_tecnico = falha_de("p2", "Outro", ErroBloco("Falhou."))
+    assert sem_tecnico["line"] is None and sem_tecnico["technical"] is None and sem_tecnico["code"] == "erro_bloco"

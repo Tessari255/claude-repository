@@ -19,7 +19,6 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
 from typing import Any
 
 from .blocks.builtin import (
@@ -35,6 +34,16 @@ from .blocks.builtin import (
 from .config import Limites
 from .errors import ApiError, ErroBloco
 from .erros_sandbox import NAO_REPETIR, SUGESTOES, erro_da_sandbox
+from .execucao import (
+    MAX_REGISTROS,
+    Cancelado,
+    Encerrado,
+    Execucao,
+    Resultado,
+    ResultadoLista,
+    chave_etapa,
+    falha_de,
+)
 from .models import BlockType, Campo, Flow, Passo, Ref
 from .passos import definicao_efetiva, percorrer, regras_declaradas
 from .registry import Registro
@@ -54,61 +63,7 @@ from .validation import (
 
 log = logging.getLogger("trama.motor")
 
-MAX_REGISTROS = 5000  # linhas de histórico (passos × repetições) por execução
-
 ESTADOS_ROTULO = {"concluido": "teve sucesso", "falhou": "falhou", "ignorado": "foi ignorado", "expirou": "expirou"}
-
-
-def chave_etapa(step_id: str, iteracao: tuple[int, ...]) -> str:
-    return step_id if not iteracao else f"{step_id}@{'.'.join(str(i) for i in iteracao)}"
-
-
-# --------------------------------------------------------------------------- estado de uma execução
-class Cancelado(Exception):
-    """O usuário cancelou a execução."""
-
-
-class Encerrado(Exception):
-    """Um passo “Encerrar” terminou a execução."""
-
-    def __init__(self, estado: str, mensagem: str, passo: Passo) -> None:
-        super().__init__(mensagem)
-        self.estado, self.mensagem, self.passo = estado, mensagem, passo
-
-
-@dataclass
-class Resultado:
-    """O que aconteceu com um passo: estado, se foi por tempo esgotado e as falhas que ninguém tratou."""
-
-    estado: str  # concluido | falhou | ignorado
-    expirou: bool = False
-    falhas: list[dict[str, Any]] = field(default_factory=list)
-    mensagem: str = ""  # texto curto do erro (para o “resultado de cada passo” do escopo)
-
-
-@dataclass
-class Execucao:
-    run_id: str
-    flow: Flow
-    defs: dict[str, BlockType]
-    port_types: dict[str, dict[str, dict[str, str]]]
-    trigger_inputs: dict[str, Any]
-    cancelar: threading.Event
-    valores: dict[str, dict[str, Any]] = field(default_factory=dict)
-    saidas_finais: list[dict[str, Any]] = field(default_factory=list)
-    var_tipos: dict[str, str] = field(default_factory=dict)
-    nomes: dict[str, str] = field(default_factory=dict)
-    posicao: int = 0
-    registros: int = 0
-
-    def checar_cancelamento(self) -> None:
-        if self.cancelar.is_set():
-            raise Cancelado()
-
-
-def _falha(passo_id: str, nome: str, e: ErroBloco) -> dict[str, Any]:
-    return {"step_id": passo_id, "step_name": nome, "code": e.codigo, "message": e.mensagem,
-            "suggestion": e.sugestao, "line": (e.tecnico or {}).get("line"), "technical": e.tecnico}
 
 
 class Motor:
@@ -353,14 +308,14 @@ class Motor:
             dur = int((time.monotonic() - t0) * 1000)
             self._gravar(ex, passo.id, iteracao, state="falhou", finished_at=agora(), duration_ms=dur,
                          logs=ctx.logs, error=e.como_dict())
-            return Resultado("falhou", e.codigo == "tempo_esgotado", [_falha(passo.id, nome, e)], e.mensagem)
+            return Resultado("falhou", e.codigo == "tempo_esgotado", [falha_de(passo.id, nome, e)], e.mensagem)
         except Exception as e:
             log.exception("Erro inesperado no passo %s", passo.id)
             erro = ErroBloco("Ocorreu um erro interno ao executar este passo.", codigo="erro_interno",
                              tecnico={"type": type(e).__name__})
             self._gravar(ex, passo.id, iteracao, state="falhou", finished_at=agora(),
                          duration_ms=int((time.monotonic() - t0) * 1000), logs=ctx.logs, error=erro.como_dict())
-            return Resultado("falhou", False, [_falha(passo.id, nome, erro)], erro.mensagem)
+            return Resultado("falhou", False, [falha_de(passo.id, nome, erro)], erro.mensagem)
 
     # ------------------------------------------------------------ campos dinâmicos
     def _valor_da_ref(self, ex: Execucao, ref: Ref) -> Any:
@@ -693,7 +648,7 @@ class Motor:
             self.store.atualizar_etapa(rid, "teste", state="falhou", finished_at=agora(), duration_ms=dur,
                                        logs=ctx.logs, error=e.como_dict())
             self.store.atualizar_execucao(rid, state="falhou", finished_at=agora(), duration_ms=dur, result={"outputs": []},
-                                          error=_falha("teste", tipo.name, e))
+                                          error=falha_de("teste", tipo.name, e))
             return
         except Exception as e:
             log.exception("Erro inesperado ao testar bloco %s", tipo.id)
@@ -702,16 +657,10 @@ class Motor:
                              tecnico={"type": type(e).__name__})
             self.store.atualizar_etapa(rid, "teste", state="falhou", finished_at=agora(), duration_ms=dur, error=erro.como_dict())
             self.store.atualizar_execucao(rid, state="falhou", finished_at=agora(), duration_ms=dur,
-                                          error=_falha("teste", tipo.name, erro))
+                                          error=falha_de("teste", tipo.name, erro))
             return
         dur = int((time.monotonic() - t0) * 1000)
         self.store.atualizar_etapa(rid, "teste", state="concluido", finished_at=agora(), duration_ms=dur,
                                    outputs=saidas, logs=ctx.logs)
         self.store.atualizar_execucao(rid, state="concluido", finished_at=agora(), duration_ms=dur,
                                       result={"outputs": [{"step_id": "teste", "title": tipo.name, "value": saidas}]})
-
-
-@dataclass
-class ResultadoLista:
-    falhas: list[dict[str, Any]]
-    resumo: list[dict[str, Any]]
