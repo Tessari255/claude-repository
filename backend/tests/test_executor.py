@@ -383,7 +383,10 @@ def test_vigia_dentro_do_contêiner_encerra_codigo_orfao_se_o_host_morrer(execut
                 "    s.setitimer(s.ITIMER_REAL, 0)\n    while True:\n        time.sleep(1)\n"}
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        proc.stdin.write(json.dumps(job).encode()); proc.stdin.close()
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(job).encode())
+        proc.stdin.close()
+        r = subprocess.CompletedProcess([], 1, "", "")
         for _ in range(40):  # espera o contêiner existir e estar rodando
             r = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", nome], capture_output=True, text=True)
             if r.stdout.strip() == "true":

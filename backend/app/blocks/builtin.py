@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import math
 import string
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from ..config import Limites
 from ..errors import ErroBloco
 from ..models import BlockType, Option, ParamDef, PortDef, SlotDef, TypeFrom, VisibleWhen
-from ..tipos import descrever_valor, tipo_do_valor
+from ..tipos import descrever_valor
 
 # Cada bloco tem uma versão de contrato; mudar o contrato exige nova versão.
 VERSAO = 1
@@ -45,7 +46,7 @@ Validador = Callable[[dict[str, Any]], list[tuple[str | None, str]]]
 
 # ------------------------------------------------------------------------------ utilidades
 def _opcoes(*pares: tuple[str, str]) -> list[Option]:
-    return [Option(value=v, label=l) for v, l in pares]
+    return [Option(value=v, label=lin) for v, lin in pares]
 
 
 def _numero(r: Any) -> Any:
@@ -110,7 +111,7 @@ def buscar_caminho(objeto: Any, caminho: str) -> Any:
 MAX_CAMINHOS = 50
 
 
-def _exigir_tamanho(estimado: int, ctx: "ContextoBloco", o_que: str) -> None:
+def _exigir_tamanho(estimado: int, ctx: ContextoBloco, o_que: str) -> None:
     """Blocos internos rodam no processo da API: o tamanho do resultado é conferido ANTES de montá-lo."""
     if estimado > ctx.limites.valor_max:
         raise ErroBloco(
@@ -401,14 +402,14 @@ def _saida(inputs, params, ctx):
 
 
 # ------------------------------------------------------------------------------ validadores de parâmetros
-def _validar_transformar_lista(params):
+def _validar_transformar_lista(params: dict[str, Any]) -> list[tuple[str | None, str]]:
     erros: list[tuple[str | None, str]] = []
     if params.get("operacao") == "dividir" and params.get("operando", 1) == 0:
         erros.append(("operando", "Não é possível dividir por zero: escolha um valor diferente de 0."))
     return erros
 
 
-def _validar_variavel_nova(params):
+def _validar_variavel_nova(params: dict[str, Any]) -> list[tuple[str | None, str]]:
     nome = str(params.get("nome", "")).strip()
     if nome and len(nome) > 40:
         return [("nome", "O nome da variável deve ter no máximo 40 caracteres.")]

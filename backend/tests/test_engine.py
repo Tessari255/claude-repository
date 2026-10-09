@@ -11,7 +11,7 @@ import pytest
 from app import engine
 from app.errors import ApiError
 
-from .helpers import (campo, compor, condicao, estados, etapas, fluxo, lit, matematica, passo, ref, repeticoes, saida, tpl)
+from .helpers import campo, compor, condicao, estados, etapas, fluxo, lit, matematica, passo, ref, repeticoes, saida, tpl
 
 
 def soma(a=2, b=3, operacao="somar"):
@@ -508,7 +508,7 @@ def test_transformar_texto(sem_docker):
 def test_tentativas_repetem_o_passo_que_falhou_e_registram_nos_logs(sem_docker):
     f = fluxo([matematica("quebra", lit(1), lit(0), "dividir", retry=2)])
     run = sem_docker.executar(f)
-    logs = [l["text"] for l in etapas(run)["quebra"]["logs"]]
+    logs = [linha["text"] for linha in etapas(run)["quebra"]["logs"]]
     assert run["state"] == "falhou" and len([t for t in logs if "falhou" in t]) == 2
     assert "Tentativa 1 de 3 falhou" in logs[0] and "Tentativa 2 de 3 falhou" in logs[1]
 

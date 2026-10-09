@@ -296,8 +296,8 @@ export function BlockEditorDialog({
           </p>
 
           <h3 className="secao">Testar com dados de exemplo</h3>
-          {entradas.map((e) => (
-            <div key={e.id || Math.random()} className="campo-teste">
+          {entradas.map((e, i) => (
+            <div key={e.id || `entrada-${i}`} className="campo-teste">
               {!e.required && (
                 <label className="checagem">
                   <input type="checkbox" checked={!!usarTeste[e.id]} onChange={(ev) => setUsarTeste((u) => ({ ...u, [e.id]: ev.target.checked }))} />

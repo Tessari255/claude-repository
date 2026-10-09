@@ -7,12 +7,10 @@ import threading
 import time
 import tracemalloc
 
-import pytest
-
 from app.sandbox import DockerExecutor
 
 from .conftest import IMAGEM, LIMITES_TESTE, cliente
-from .helpers import (analisar_dict, campo, compor, estados, etapas, fluxo, lit, matematica, passo, ref, saida, tpl)
+from .helpers import analisar_dict, campo, compor, etapas, fluxo, lit, matematica, passo, ref, saida, tpl
 
 
 def _pico_de_memoria(funcao):

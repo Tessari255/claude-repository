@@ -15,16 +15,22 @@ os de um escopo ficam.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .blocks.builtin import (
-    OPERADORES, OPERADORES_DE_ORDEM, OPERADORES_UNARIOS, VALIDADORES, _parse_numero, requer_sandbox,
+    OPERADORES,
+    OPERADORES_DE_ORDEM,
+    OPERADORES_UNARIOS,
+    VALIDADORES,
+    _parse_numero,
+    requer_sandbox,
 )
 from .config import Limites
-from .models import BlockType, Campo, Flow, ID_GATILHO, Issue, ParamDef, Passo, Ref
+from .models import ID_GATILHO, BlockType, Campo, Flow, Issue, ParamDef, Passo, Ref
 from .passos import definicao_efetiva, percorrer, portas_declaradas, regras_declaradas
-from .tipos import ROTULOS_TIPO, descrever_valor, rotulo_tipo, tipo_do_valor, tipos_compativeis, valor_e_do_tipo
+from .tipos import ROTULOS_TIPO, rotulo_tipo, tipo_do_valor, tipos_compativeis, valor_e_do_tipo
 
 Resolver = Callable[[str, int], BlockType | None]
 UltimaVersao = Callable[[str], int | None]
@@ -56,7 +62,7 @@ def nome_passo(passo: Passo, tipo: BlockType | None) -> str:
 
 # ---------------------------------------------------------------------------- parâmetros
 def valor_efetivo(pdef: ParamDef, params: dict[str, Any]) -> Any:
-    return params[pdef.id] if pdef.id in params else pdef.default
+    return params.get(pdef.id, pdef.default)
 
 
 def parametro_visivel(pdef: ParamDef, tipo: BlockType, params: dict[str, Any]) -> bool:

@@ -9,8 +9,22 @@ from pydantic import ValidationError
 from app.config import Limites
 from app.models import Campo, Flow
 
-from .helpers import (analisar_dict, campo, carregar_exemplo, codigos, compor, condicao, fluxo, lit, matematica, passo,
-                      python_inline, ref, saida, tpl)
+from .helpers import (
+    analisar_dict,
+    campo,
+    carregar_exemplo,
+    codigos,
+    compor,
+    condicao,
+    fluxo,
+    lit,
+    matematica,
+    passo,
+    python_inline,
+    ref,
+    saida,
+    tpl,
+)
 
 
 def soma_basica():
@@ -83,7 +97,8 @@ def test_irmao_de_outro_ramo_nao_e_visivel():
 
 
 def test_item_do_laco_so_existe_dentro_do_laco():
-    laco = lambda corpo: passo("p", "builtin.para_cada", {"lista": ref("gatilho", "l")}, {"limite": 10}, slots={"corpo": corpo})
+    def laco(corpo):
+        return passo("p", "builtin.para_cada", {"lista": ref("gatilho", "l")}, {"limite": 10}, slots={"corpo": corpo})
     dentro = fluxo([laco([compor("x", ref("p", "item"))])], [campo("l", "lista", [1])])
     assert analisar_dict(dentro).erros == []
     fora = fluxo([laco([]), compor("x", ref("p", "item"))], [campo("l", "lista", [1])])
@@ -258,7 +273,8 @@ def test_nome_de_variavel_repetido():
 
 
 def test_definir_variavel_exige_variavel_existente_e_anterior():
-    definir = lambda variavel: passo("d", "builtin.var_definir", {"valor": lit(1)}, {"variavel": variavel})
+    def definir(variavel):
+        return passo("d", "builtin.var_definir", {"valor": lit(1)}, {"variavel": variavel})
     assert "variavel_invalida" in codigos(analisar_dict(fluxo([definir("")])))
     assert "variavel_invalida" in codigos(analisar_dict(fluxo([definir("v")])))  # nem existe
     assert "variavel_invalida" in codigos(analisar_dict(fluxo([definir("v"), var("v", "x")])))  # criada depois

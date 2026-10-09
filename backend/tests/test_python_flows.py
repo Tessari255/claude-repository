@@ -17,7 +17,7 @@ from app.sandbox import DockerExecutor
 from app.validation import analisar
 
 from .conftest import IMAGEM, _montar
-from .helpers import (campo, carregar_exemplo, compor, estados, etapas, fluxo, lit, passo, python_inline, ref, repeticoes, saida)
+from .helpers import campo, carregar_exemplo, compor, estados, etapas, fluxo, lit, passo, python_inline, ref, repeticoes, saida
 
 pytestmark = pytest.mark.docker
 
@@ -111,7 +111,7 @@ def test_tempo_limite_do_proprio_passo_e_menor_que_o_do_servidor(com_docker):
 
 def test_tentativas_repetem_o_codigo_python_que_falhou(com_docker):
     run = com_docker.executar(com_saida([inline("def run(inputs, params):\n    return {'mensagem': 1/0}", retry=1)]))
-    logs = [l["text"] for l in etapas(run)["p"]["logs"]]
+    logs = [linha["text"] for linha in etapas(run)["p"]["logs"]]
     assert run["state"] == "falhou" and any("Tentativa 1 de 2 falhou" in t for t in logs)
 
 

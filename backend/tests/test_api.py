@@ -5,14 +5,27 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import threading
 import time
 
 import pytest
 
 from .conftest import LIMITES_TESTE, cliente
-from .helpers import (aguardar, campo, carregar_exemplo, compor, condicao, estados, etapas, fluxo, lit, matematica, passo, python_inline,
-                      ref, repeticoes, saida)
+from .helpers import (
+    aguardar,
+    campo,
+    carregar_exemplo,
+    compor,
+    condicao,
+    etapas,
+    fluxo,
+    lit,
+    matematica,
+    passo,
+    python_inline,
+    ref,
+    repeticoes,
+    saida,
+)
 
 
 def fluxo_completo():

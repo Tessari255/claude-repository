@@ -1,0 +1,36 @@
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "E501",   # linhas longas são aceitas até o limite do formatador
+  "RUF001", "RUF002", "RUF003",  # aspas e travessões tipográficos nas mensagens em português
+  "SIM108", # if/else explícito é mais legível que ternário longo
+  "B008",   # Depends()/Field() em argumentos padrão é o idioma do FastAPI/pydantic
+  "RUF012", # atributos mutáveis de classe (pydantic)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pyright]
+include = ["app", "tests"]
+exclude = [".venv"]
+extraPaths = ["."]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+reportMissingImports = true
+# Os testes usam fetchone()/dicionários opcionais à vontade: lá a checagem de Optional só atrapalha.
+executionEnvironments = [
+  { root = "tests", reportOptionalSubscript = false, reportOptionalMemberAccess = false, reportPossiblyUnboundVariable = false,
+    reportOperatorIssue = false, reportAttributeAccessIssue = false, reportFunctionMemberAccess = false, reportReturnType = false },
+  { root = "app" },
+]
+
+[tool.ruff.lint.per-file-ignores]
+# O runner roda DENTRO do contêiner e é mantido propositalmente simples e sem dependências de estilo.
+"../executor/runner.py" = ["UP031", "B904"]

@@ -19,6 +19,7 @@ Se o Docker ou a imagem não estiverem disponíveis, ``status()`` informa o moti
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -29,7 +30,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeGuard
 
 from ..config import Limites
 
@@ -92,7 +93,7 @@ CATEGORIAS_DE_ERRO = frozenset({
 })
 
 
-def _eh_int(v: Any) -> bool:
+def _eh_int(v: Any) -> TypeGuard[int]:
     return isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10**9
 
 
@@ -298,10 +299,13 @@ class DockerExecutor:
             return SandboxResult(False, error=_erro(
                 "executor_indisponivel", "Não foi possível iniciar o executor isolado."))
 
+        entrada = proc.stdin
+        assert entrada is not None  # Popen com stdin=PIPE
+
         def escrever() -> None:
             try:
-                proc.stdin.write(corpo)
-                proc.stdin.close()
+                entrada.write(corpo)
+                entrada.close()
             except (BrokenPipeError, OSError, ValueError):
                 pass
 
@@ -415,7 +419,9 @@ class DockerExecutor:
             duracao_runner = r.get("duration_ms")
             return SandboxResult(True, payload=payload, logs=logs,
                                  duration_ms=duracao_runner if _eh_int(duracao_runner) else duracao)
-        bruto = r.get("error") if isinstance(r.get("error"), dict) else {}
+        bruto = r.get("error")
+        if not isinstance(bruto, dict):
+            bruto = {}
         categoria = bruto.get("category")
         erro = {
             "category": categoria if categoria in CATEGORIAS_DE_ERRO else "excecao",
@@ -432,10 +438,8 @@ class DockerExecutor:
     def _abater(self, nome: str, proc: subprocess.Popen) -> None:
         """Encerra o contêiner (matar só o cliente `docker run` NÃO mata o contêiner)."""
         for _ in range(5):
-            try:
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                 subprocess.run([self.docker_bin, "kill", nome], capture_output=True, timeout=10)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
             try:
                 proc.wait(timeout=2)
                 break
@@ -443,7 +447,5 @@ class DockerExecutor:
                 continue
         else:
             proc.kill()
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             subprocess.run([self.docker_bin, "rm", "-f", nome], capture_output=True, timeout=10)
-        except (subprocess.TimeoutExpired, OSError):
-            pass

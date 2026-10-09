@@ -140,7 +140,7 @@ class ParamDef(Estrito):
         return v
 
     @model_validator(mode="after")
-    def _selecao(self) -> "ParamDef":
+    def _selecao(self) -> ParamDef:
         if self.type == "selecao" and not self.options:
             raise ValueError("parâmetros do tipo seleção precisam de ao menos uma opção")
         return self
@@ -181,7 +181,7 @@ class BlockType(Estrito):
         return v
 
     @model_validator(mode="after")
-    def _unicos(self) -> "BlockType":
+    def _unicos(self) -> BlockType:
         _conferir_ids_unicos(self.inputs, self.outputs, self.params)
         if self.kind == "python" and not (self.code or "").strip():
             raise ValueError("blocos Python precisam de código")
@@ -216,7 +216,7 @@ class BlockDraft(Estrito):
     code: str = Field(min_length=1, max_length=MAX_CODIGO)
 
     @model_validator(mode="after")
-    def _unicos(self) -> "BlockDraft":
+    def _unicos(self) -> BlockDraft:
         _conferir_ids_unicos(self.inputs, self.outputs, self.params)
         return self
 
@@ -248,7 +248,7 @@ class Campo(Estrito):
     parts: list[str | Ref] | None = Field(default=None, max_length=MAX_PARTES)
 
     @model_validator(mode="after")
-    def _um_dos_dois(self) -> "Campo":
+    def _um_dos_dois(self) -> Campo:
         tem_valor = "value" in self.model_fields_set
         if tem_valor == (self.parts is not None):
             raise ValueError("informe um valor fixo (value) ou conteúdo dinâmico (parts), e não os dois")
@@ -303,7 +303,7 @@ class Passo(Estrito):
     # Em quais situações do passo anterior (da mesma lista) este passo roda. Padrão: só se teve sucesso.
     run_after: list[ExecutarApos] = Field(default_factory=lambda: ["sucesso"], min_length=1, max_length=4)
     settings: Configuracoes = Field(default_factory=Configuracoes)
-    slots: dict[str, list["Passo"]] = Field(default_factory=dict, max_length=4)
+    slots: dict[str, list[Passo]] = Field(default_factory=dict, max_length=4)
 
     @field_validator("id")
     @classmethod
@@ -339,7 +339,7 @@ class Passo(Estrito):
 
     @field_validator("slots")
     @classmethod
-    def _ids_dos_espacos(cls, v: dict[str, list["Passo"]]) -> dict[str, list["Passo"]]:
+    def _ids_dos_espacos(cls, v: dict[str, list[Passo]]) -> dict[str, list[Passo]]:
         for chave in v:
             if not RE_ID_PORTA.match(chave):
                 raise ValueError(f"identificador de espaço inválido: {chave!r}")
@@ -366,7 +366,7 @@ class Flow(Estrito):
         return v
 
     @model_validator(mode="after")
-    def _limites(self) -> "Flow":
+    def _limites(self) -> Flow:
         total = 0
         pilha: list[tuple[list[Passo], int]] = [(self.steps, 1)]
         while pilha:

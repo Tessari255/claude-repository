@@ -15,7 +15,7 @@ from app.migracao import migrar_fluxo
 from app.models import Flow
 from app.store import Store
 
-from .helpers import analisar_dict, carregar_v1, estados, etapas
+from .helpers import analisar_dict, carregar_v1, estados
 
 
 def bloco(id, tipo, params=None, label=None):

@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import path from 'node:path'
 import fs from 'node:fs'
 import os from 'node:os'
-import { adicionarNoFim, barra, cartao, criarFluxo, EXEMPLOS, importarExemplo, inserirConteudoDinamico, testar } from './ajudas'
+import { adicionarNoFim, barra, cartao, criarFluxo, importarExemplo, inserirConteudoDinamico, testar } from './ajudas'
 
 test('criar do zero → declarar o gatilho → montar passos com conteúdo dinâmico → salvar → reabrir → testar', async ({ page }) => {
   await criarFluxo(page, 'Soma pelo navegador')

@@ -7,12 +7,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from .engine import erro_da_sandbox
 from .errors import ApiError
 from .models import BlockDraft, BlockType
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store
-from .engine import erro_da_sandbox
 
 
 def erros_pydantic(exc: ValidationError) -> list[dict[str, Any]]:

@@ -19,10 +19,11 @@ import logging
 import shutil
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .errors import ApiError
 from .migracao import fluxo_v1, migrar_fluxo
@@ -91,7 +92,7 @@ CAMPOS_EXECUCAO = frozenset({"state", "started_at", "finished_at", "duration_ms"
 
 
 def agora() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def novo_id(prefixo: str) -> str:
@@ -157,7 +158,7 @@ class Store:
                     antigo = json.loads(r["flow"])
                     novo = migrar_fluxo(antigo) if fluxo_v1(antigo) else antigo
                     descricao = r["description"]
-                except Exception:  # noqa: BLE001 — dado ilegível: não perde o projeto, só o fluxo
+                except Exception:
                     log.exception("Não foi possível converter o projeto %s", r["id"])
                     novo = {"schema_version": 2, "steps": []}
                     descricao = (r["description"] + "\n\n" if r["description"] else "") + \

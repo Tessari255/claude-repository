@@ -338,14 +338,14 @@ def main():
         except NameError as exc:
             ausente = "def run" in str(exc) or "def transformar" in str(exc)
             resposta = {"ok": False, "error": _descrever(exc, linhas, "funcao_ausente" if ausente else "excecao")}
-        except BaseException as exc:  # noqa: BLE001 — qualquer falha do código do usuário
+        except BaseException as exc:
             resposta = {"ok": False, "error": _descrever(exc, linhas)}
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             sys.stdout, sys.stderr = stdout_real, stderr_real
         resposta["logs"] = logs.pedacos
         _emitir(token, resposta)
-    except BaseException as exc:  # noqa: BLE001 — falha do próprio runner
+    except BaseException as exc:
         signal.setitimer(signal.ITIMER_REAL, 0)
         sys.stdout, sys.stderr = stdout_real, stderr_real
         if isinstance(exc, TempoEsgotado):  # o aviso chegou durante o tratamento de outro erro

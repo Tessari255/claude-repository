@@ -13,7 +13,7 @@ test('sem o executor isolado a dependência é informada e o código Python fica
   await expect(page.locator('.banner-executor')).toContainText('Os demais blocos continuam funcionando')
 
   // um passo de código Python entra no fluxo (dá para escrever), mas o fluxo é recusado ANTES de testar
-  const python = await adicionarNoFim(page, 'Executar código Python')
+  await adicionarNoFim(page, 'Executar código Python')
   const painel = page.getByRole('complementary', { name: /^Configuração de/ })
   await expect(painel).toContainText('O executor isolado está indisponível')
   await expect(barra(page).getByRole('button', { name: /Verificador/ }).locator('.ponto-vermelho')).toBeVisible()

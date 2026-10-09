@@ -29,12 +29,12 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       'Confira se o servidor está rodando e tente de novo.')
   }
   if (resp.status === 204) return undefined as T
-  let dados: any = null
+  let dados: unknown = null
   try {
     dados = await resp.json()
   } catch { /* corpo vazio ou inválido */ }
   if (!resp.ok) {
-    const e = dados?.error
+    const e = (dados as { error?: { code?: string; message?: string; suggestion?: string | null; issues?: Issue[] } } | null)?.error
     throw new ApiFailure(resp.status, e?.code ?? 'erro', e?.message ?? 'Ocorreu um erro inesperado.',
       e?.suggestion, e?.issues ?? [])
   }

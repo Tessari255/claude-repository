@@ -122,7 +122,7 @@ def migrar_fluxo(flow: dict[str, Any]) -> dict[str, Any]:
         passo: dict[str, Any] = {"id": novo_id[bid], "type": tipo, "version": b.get("version", 1),
                                  "label": b.get("label"), "inputs": {}, "params": params}
 
-        def campo(porta: str) -> dict[str, Any] | None:
+        def campo(porta: str, bid: str = bid) -> dict[str, Any] | None:
             origem = entrada_de.get((bid, porta))
             if origem is None:
                 return None

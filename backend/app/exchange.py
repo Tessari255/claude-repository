@@ -8,6 +8,7 @@ importado só roda no executor isolado, como qualquer outro.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from typing import Any, Literal
 
@@ -70,10 +71,8 @@ def importar(store: Store, registro: Registro, bruto: Any, *, aplicar: bool = Tr
                        sugestao="Escolha um arquivo .json exportado pela própria Trama.")
     if bruto.get("format_version") == 1 and isinstance(bruto.get("flow"), dict) and fluxo_v1(bruto["flow"]):
         # arquivo exportado pela versão anterior (grafo de blocos): converte para passos antes de validar
-        try:
+        with contextlib.suppress(Exception):
             bruto = {**bruto, "format_version": 2, "flow": migrar_fluxo(bruto["flow"])}
-        except Exception:  # noqa: BLE001 — dados malformados: cai na validação normal abaixo, com mensagem clara
-            pass
     try:
         env = Envelope.model_validate(bruto)
     except ValidationError as e:

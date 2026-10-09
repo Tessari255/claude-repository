@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test'
-import { adicionarNoFim, barra, cartao, criarFluxo, escolherBloco, inserirConteudoDinamico, substituirCodigo, testar } from './ajudas'
+import { adicionarNoFim, cartao, criarFluxo, escolherBloco, inserirConteudoDinamico, substituirCodigo, testar } from './ajudas'
 
 test('passo de código Python no fluxo: erro com a linha, correção, resultado e salvar como bloco reutilizável', async ({ page }) => {
   await criarFluxo(page, 'Python no fluxo')
-  const python = await adicionarNoFim(page, 'Executar código Python')
+  await adicionarNoFim(page, 'Executar código Python')
   const painel = page.getByRole('complementary', { name: /^Configuração de/ })
 
   // Python REAL com erro: o cartão mostra "Falhou" e o painel aponta a linha e explica a causa

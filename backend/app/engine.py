@@ -23,7 +23,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .blocks.builtin import (
-    HANDLERS, ContextoBloco, avaliar_regra, buscar_caminho, combinar_regras, requer_sandbox, texto_de,
+    HANDLERS,
+    ContextoBloco,
+    avaliar_regra,
+    buscar_caminho,
+    combinar_regras,
+    requer_sandbox,
+    texto_de,
     valor_padrao_do_tipo,
 )
 from .config import Limites
@@ -33,9 +39,15 @@ from .passos import definicao_efetiva, percorrer, regras_declaradas
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store, agora
-from .tipos import descrever_valor, rotulo_tipo, valor_e_do_tipo, validar_json_puro
+from .tipos import descrever_valor, rotulo_tipo, validar_json_puro, valor_e_do_tipo
 from .validation import (
-    CONTEINERES_DE_LACO, analisar, campo_vazio, mensagem_parametro, nome_passo, parametro_visivel, parametros_efetivos,
+    CONTEINERES_DE_LACO,
+    analisar,
+    campo_vazio,
+    mensagem_parametro,
+    nome_passo,
+    parametro_visivel,
+    parametros_efetivos,
     valor_efetivo,
 )
 
@@ -239,7 +251,7 @@ class Motor:
             ev = self._cancelamentos.setdefault(run_id, threading.Event())
         try:
             self._rodar(run_id, ev)
-        except Exception:  # noqa: BLE001 — nunca deixar uma execução presa em "executando"
+        except Exception:
             log.exception("Falha inesperada no motor (execução %s)", run_id)
             self.store.atualizar_execucao(
                 run_id, state="falhou", finished_at=agora(),
@@ -297,7 +309,7 @@ class Motor:
             result=resultado, error=erro)
 
     # ----------------------------------------------------------- listas e passos
-    def _lista(self, ex: Execucao, passos: list[Passo], iteracao: tuple[int, ...]) -> "ResultadoLista":
+    def _lista(self, ex: Execucao, passos: list[Passo], iteracao: tuple[int, ...]) -> ResultadoLista:
         """Executa uma lista de passos em sequência. Devolve as falhas não tratadas e o resumo de cada passo."""
         anterior: Resultado | None = None
         anterior_nome = ""
@@ -401,7 +413,7 @@ class Motor:
             self._gravar(ex, passo.id, iteracao, state="falhou", finished_at=agora(), duration_ms=dur,
                          logs=ctx.logs, error=e.como_dict())
             return Resultado("falhou", e.codigo == "tempo_esgotado", [_falha(passo.id, nome, e)], e.mensagem)
-        except Exception as e:  # noqa: BLE001 — bug em bloco interno: não vazar detalhes
+        except Exception as e:
             log.exception("Erro inesperado no passo %s", passo.id)
             erro = ErroBloco("Ocorreu um erro interno ao executar este passo.", codigo="erro_interno",
                              tecnico={"type": type(e).__name__})
@@ -472,6 +484,8 @@ class Motor:
         self._gravar(ex, passo.id, iteracao, inputs=entradas)
         params = parametros_efetivos(tipo, passo.params)
         tentativas = 1 + passo.settings.retry.count
+        saidas: dict[str, Any] = {}
+        n = 0
         for n in range(1, tentativas + 1):
             ex.checar_cancelamento()
             try:
@@ -740,7 +754,7 @@ class Motor:
             self.store.atualizar_execucao(rid, state="falhou", finished_at=agora(), duration_ms=dur, result={"outputs": []},
                                           error=_falha("teste", tipo.name, e))
             return
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("Erro inesperado ao testar bloco %s", tipo.id)
             dur = int((time.monotonic() - t0) * 1000)
             erro = ErroBloco("Ocorreu um erro interno ao executar este bloco.", codigo="erro_interno",

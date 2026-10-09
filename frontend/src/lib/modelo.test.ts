@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { BlockType, Flow, Passo, PortTypes, Run } from '../types'
+import type { BlockType, Flow, Passo, PortTypes, Regra, Run } from '../types'
 import {
   achar, atualizarPasso, campoDePartes, campoVazio, conteudoDinamicoPara, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, novoPasso,
   partesDe, referenciaUnica, remover, renomearSaida, repeticoesDoLaco, tipoDaEntrada, todosOsPassos, usaOPasso, visiveisPara,
@@ -143,8 +143,8 @@ describe('árvore de passos', () => {
       p('c', 'condicao', { params: { regras: [{ esq: { parts: [ref] }, op: 'igual', dir: { parts: [ref] } }] } })])
     const g = renomearSaida(f, 'gatilho', 'nome', 'pessoa')
     expect(g.steps[0].inputs.entrada).toEqual({ parts: ['oi ', { ...ref, output: 'pessoa' }] })
-    expect((g.steps[1].params.regras as any)[0].esq).toEqual({ parts: [{ ...ref, output: 'pessoa' }] })
-    expect((g.steps[1].params.regras as any)[0].dir).toEqual({ parts: [{ ...ref, output: 'pessoa' }] })
+    expect((g.steps[1].params.regras as Regra[])[0].esq).toEqual({ parts: [{ ...ref, output: 'pessoa' }] })
+    expect((g.steps[1].params.regras as Regra[])[0].dir).toEqual({ parts: [{ ...ref, output: 'pessoa' }] })
     expect(f.steps[0].inputs.entrada).toEqual({ parts: ['oi ', ref] })
   })
 

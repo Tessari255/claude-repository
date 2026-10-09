@@ -146,6 +146,7 @@ function CartaoBase({
 }: { passo: Passo; indice: number; irmaos: Passo[]; contexto: number[]; gatilho?: boolean }) {
   const c = useDesigner()
   const def = c.defDe(passo)
+  const linha = linhaDoPasso(c.run, passo.id, contexto)
   const nome = nomeDoPasso(passo, def)
   const nomeDaRef = (r: Ref) => {
     const alvo = c.porId.get(r.step)
@@ -153,7 +154,6 @@ function CartaoBase({
     const ef = alvo && d ? definicaoEfetiva(d, alvo.params) : undefined
     return ef?.outputs.find((o) => o.id === r.output)?.label ?? r.output
   }
-  const linha = linhaDoPasso(c.run, passo.id, contexto)
   const meus = c.problemas.filter((i) => i.step_id === passo.id)
   const erros = meus.filter((i) => i.severity === 'erro').length
   const avisos = meus.length - erros
@@ -237,7 +237,6 @@ function PassoNaSequencia({ passo, indice, irmaos, contexto }: { passo: Passo; i
   if (!def || def.slots.length === 0) return <CartaoBase passo={passo} indice={indice} irmaos={irmaos} contexto={contexto} />
 
   const laco = CONTEINERES_DE_LACO.has(def.id)
-  const linha = linhaDoPasso(c.run, passo.id, contexto)
   const { total, atual } = laco ? iteracaoEscolhida(c.run, passo, contexto, c.iteracoes) : { total: 0, atual: 0 }
   const chave = chaveIteracao(passo.id, contexto)
   const contextoFilhos = laco ? [...contexto, atual] : contexto
