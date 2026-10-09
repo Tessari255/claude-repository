@@ -24,14 +24,11 @@ from typing import Any
 from .blocks.builtin import (
     HANDLERS,
     ContextoBloco,
-    avaliar_regra,
-    buscar_caminho,
-    combinar_regras,
     requer_sandbox,
-    texto_de,
     valor_padrao_do_tipo,
 )
 from .config import Limites
+from .dinamico import avaliar_regras, montar_entradas
 from .errors import ApiError, ErroBloco
 from .erros_sandbox import NAO_REPETIR, SUGESTOES, erro_da_sandbox
 from .execucao import (
@@ -44,8 +41,8 @@ from .execucao import (
     falha_de,
 )
 from .historico import Historico
-from .models import BlockType, Campo, Flow, Passo, Ref
-from .passos import definicao_efetiva, percorrer, regras_declaradas
+from .models import BlockType, Flow, Passo
+from .passos import definicao_efetiva, percorrer
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store, agora
@@ -53,7 +50,6 @@ from .tipos import descrever_valor, rotulo_tipo, validar_json_puro, valor_e_do_t
 from .validation import (
     CONTEINERES_DE_LACO,
     analisar,
-    campo_vazio,
     mensagem_parametro,
     nome_passo,
     parametro_visivel,
@@ -306,66 +302,10 @@ class Motor:
                                         duration_ms=int((time.monotonic() - t0) * 1000), logs=ctx.logs, error=erro.como_dict())
             return Resultado("falhou", False, [falha_de(passo.id, nome, erro)], erro.mensagem)
 
-    # ------------------------------------------------------------ campos dinâmicos
-    def _valor_da_ref(self, ex: Execucao, ref: Ref) -> Any:
-        saidas = ex.valores.get(ref.step)
-        rotulo = f"{ex.nomes.get(ref.step, ref.step)} › {ref.output}"
-        if saidas is None or ref.output not in saidas:
-            raise ErroBloco(
-                f"O conteúdo dinâmico “{rotulo}” não está disponível: o passo não foi executado ou não produziu esse valor.",
-                codigo="conteudo_indisponivel",
-                sugestao="Confira se o passo de origem roda antes deste e se não foi ignorado ou não falhou.")
-        valor = saidas[ref.output]
-        if ref.path:
-            try:
-                return buscar_caminho(valor, ref.path)
-            except (KeyError, IndexError, ValueError, TypeError):
-                raise ErroBloco(f"O campo “{ref.path}” não existe em “{rotulo}”.", codigo="campo_ausente",
-                                sugestao="Confira o nome do campo (use ponto para campos internos, como endereco.cidade).") from None
-        return valor
-
-    def _resolver_campo(self, ex: Execucao, campo: Campo) -> Any:
-        if not campo.dinamico:
-            return campo.value
-        partes = campo.parts or []
-        if len(partes) == 1 and isinstance(partes[0], Ref):
-            return self._valor_da_ref(ex, partes[0])
-        pedacos: list[str] = []
-        tamanho = 0
-        for parte in partes:
-            texto = parte if isinstance(parte, str) else texto_de(self._valor_da_ref(ex, parte))
-            tamanho += len(texto)
-            if tamanho > self.limites.valor_max:
-                raise ErroBloco(f"O texto montado ficaria grande demais (mais de {self.limites.valor_max // 1024} KB).",
-                                codigo="valor_grande_demais")
-            pedacos.append(texto)
-        return "".join(pedacos)
-
-    def _entradas(self, ex: Execucao, passo: Passo, ef: BlockType) -> dict[str, Any]:
-        entradas: dict[str, Any] = {}
-        tipos = ex.port_types.get(passo.id, {}).get("inputs", {})
-        for porta in ef.inputs:
-            esperado = tipos.get(porta.id, porta.type)
-            campo = passo.inputs.get(porta.id)
-            if campo is None or campo_vazio(campo, esperado):
-                if porta.default is not None:
-                    entradas[porta.id] = porta.default
-                elif porta.required:
-                    raise ErroBloco(f"O campo obrigatório “{porta.label}” não foi preenchido.", codigo="entrada_ausente",
-                                    sugestao="Preencha o campo com um valor ou com um conteúdo dinâmico.")
-                continue
-            valor = self._resolver_campo(ex, campo)
-            if not valor_e_do_tipo(valor, esperado):
-                raise ErroBloco(
-                    f"O campo “{porta.label}” esperava {rotulo_tipo(esperado)}, mas recebeu {descrever_valor(valor)}.",
-                    codigo="entrada_invalida", sugestao="Confira o conteúdo dinâmico ou o valor digitado neste campo.")
-            entradas[porta.id] = valor
-        return entradas
-
     # ------------------------------------------------------------------ passos simples
     def _folha(self, ex: Execucao, passo: Passo, tipo: BlockType, iteracao: tuple[int, ...], ctx: ContextoBloco) -> dict[str, Any]:
         ef = definicao_efetiva(tipo, passo.params)
-        entradas = self._entradas(ex, passo, ef)
+        entradas = montar_entradas(ex, passo, ef, self.limites)
         self.historico.gravar_etapa(ex, passo.id, iteracao, inputs=entradas)
         params = parametros_efetivos(tipo, passo.params)
         tentativas = 1 + passo.settings.retry.count
@@ -511,11 +451,11 @@ class Motor:
         logs: list[dict[str, str]] = []
         nome = ex.nomes.get(passo.id, passo.id)
         params = parametros_efetivos(tipo, passo.params)
-        entradas = self._entradas(ex, passo, tipo)
+        entradas = montar_entradas(ex, passo, tipo, self.limites)
         self.historico.gravar_etapa(ex, passo.id, iteracao, inputs=entradas)
 
         if tipo.id == "builtin.condicao":
-            r = self._avaliar(ex, passo, params)
+            r = avaliar_regras(ex, params, self.limites)
             logs.append({"source": "system", "text": f"Teste concluído: {'sim' if r else 'não'}. Seguindo por “{'Se sim' if r else 'Se não'}”."})
             escolhido, outro = ("sim", "nao") if r else ("nao", "sim")
             for f in passo.slots.get(outro, []):
@@ -566,7 +506,7 @@ class Motor:
             ex.valores[passo.id] = {"indice": repeticoes}
             falhas = self._lista(ex, corpo, (*iteracao, repeticoes)).falhas
             repeticoes += 1
-            if falhas or self._avaliar(ex, passo, params):
+            if falhas or avaliar_regras(ex, params, self.limites):
                 break
             if repeticoes >= limite:
                 raise ErroBloco(f"A condição não ficou verdadeira em {limite} repetições.", codigo="limite_repeticoes",
@@ -574,17 +514,6 @@ class Motor:
         saidas = {"repeticoes": repeticoes}
         ex.valores[passo.id] = saidas
         return saidas, falhas, logs
-
-    def _avaliar(self, ex: Execucao, passo: Passo, params: dict[str, Any]) -> bool:
-        regras, erro = regras_declaradas(params.get("regras"))
-        if erro:
-            raise ErroBloco(erro, codigo="parametro_invalido")
-        resultados = []
-        for r in regras:
-            esq = self._resolver_campo(ex, r.esq)
-            dir_ = self._resolver_campo(ex, r.dir) if r.dir is not None else None
-            resultados.append(avaliar_regra(esq, r.op, dir_))
-        return combinar_regras(str(params.get("combinador", "e")), resultados)
 
     # --------------------------------------------------------------- teste isolado
     def testar_bloco(self, tipo: BlockType, params: dict[str, Any], entradas: dict[str, Any],

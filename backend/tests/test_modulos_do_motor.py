@@ -13,18 +13,20 @@ from pathlib import Path
 
 import pytest
 
+from app.config import Limites
+from app.dinamico import avaliar_regras, montar_entradas, resolver_campo, valor_da_ref
 from app.errors import ErroBloco
 from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
 from app.execucao import MAX_REGISTROS, Cancelado, Execucao, chave_etapa, falha_de
 from app.historico import Historico
-from app.models import Flow
+from app.models import Campo, Flow, Passo, Ref
 
-from .helpers import campo, compor, fluxo, lit, passo, ref, saida
+from .helpers import campo, compor, fluxo, lit, passo, ref, saida, tpl
 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -171,3 +173,94 @@ def test_toda_escrita_do_historico_passa_pela_classe_historico(sem_docker, monke
     sem_docker.motor.testar_bloco(sem_docker.registro.resolver("builtin.matematica", 1), {"operacao": "somar"}, {"a": 1, "b": 2})
     assert {nome for nome, _ in chamadas} == set(ESCRITAS)  # o roteiro exercita todos os tipos de escrita
     assert {quem for _, quem in chamadas} == {"app.historico"}
+
+
+# ------------------------------------------------------------------ conteúdo dinâmico e regras
+def _execucao_com_valores(valores, nomes=None, port_types=None):
+    return Execucao(run_id="r", flow=Flow(steps=[]), defs={}, port_types=port_types or {}, trigger_inputs={},
+                    cancelar=threading.Event(), valores=valores, nomes=nomes or {})
+
+
+def _campo(dados) -> Campo:
+    return Campo.model_validate(dados)
+
+
+def test_referencia_le_a_saida_e_segue_o_caminho_por_chaves_e_posicoes():
+    ex = _execucao_com_valores({"a": {"dados": {"itens": [{"nome": "x"}, {"nome": "y"}]}}})
+    assert valor_da_ref(ex, Ref(step="a", output="dados")) == {"itens": [{"nome": "x"}, {"nome": "y"}]}
+    assert valor_da_ref(ex, Ref(step="a", output="dados", path="itens.1.nome")) == "y"
+
+
+def test_referencia_a_passo_que_nao_rodou_ou_a_campo_inexistente_explica_o_que_faltou():
+    ex = _execucao_com_valores({"a": {"dados": {"k": 1}}}, nomes={"a": "Buscar dados", "b": "Outro"})
+    with pytest.raises(ErroBloco) as sem_passo:
+        valor_da_ref(ex, Ref(step="b", output="dados"))
+    assert sem_passo.value.codigo == "conteudo_indisponivel" and "Outro › dados" in sem_passo.value.mensagem
+    with pytest.raises(ErroBloco) as sem_saida:
+        valor_da_ref(ex, Ref(step="a", output="outra"))
+    assert sem_saida.value.codigo == "conteudo_indisponivel" and "Buscar dados › outra" in sem_saida.value.mensagem
+    with pytest.raises(ErroBloco) as sem_campo:
+        valor_da_ref(ex, Ref(step="a", output="dados", path="k.z"))
+    assert sem_campo.value.codigo == "campo_ausente" and "“k.z” não existe em “Buscar dados › dados”" in sem_campo.value.mensagem
+
+
+def test_conteudo_dinamico_nunca_avalia_nada_so_le_chaves_e_posicoes():
+    ex = _execucao_com_valores({"a": {"v": {"conta": "1 + 1", "lista": [1]}, "texto": "abc"}})
+    assert resolver_campo(ex, _campo({"parts": ["= ", {"step": "a", "output": "v", "path": "conta"}]}), Limites()) == "= 1 + 1"
+    for caminho in ("__class__", "lista.__len__", "conta.upper", "lista.0.real"):
+        with pytest.raises(ErroBloco) as exc:
+            valor_da_ref(ex, Ref(step="a", output="v", path=caminho))
+        assert exc.value.codigo == "campo_ausente", caminho
+
+
+def test_uma_unica_referencia_preserva_o_tipo_e_varias_partes_viram_texto():
+    ex = _execucao_com_valores({"a": {"lista": [1, 2], "n": 7}})
+    assert resolver_campo(ex, _campo(ref("a", "lista")), Limites()) == [1, 2]
+    assert resolver_campo(ex, _campo(lit({"x": 1})), Limites()) == {"x": 1}
+    assert resolver_campo(ex, _campo(tpl("Total: ", ("a", "n"), " itens")), Limites()) == "Total: 7 itens"
+
+
+def test_texto_montado_acima_do_limite_de_tamanho_falha_antes_de_crescer():
+    ex = _execucao_com_valores({"a": {"t": "x" * 2048}})
+    with pytest.raises(ErroBloco) as exc:
+        resolver_campo(ex, _campo(tpl(("a", "t"), ("a", "t"))), Limites(valor_max=3000))
+    assert exc.value.codigo == "valor_grande_demais"
+
+
+def test_montar_entradas_aplica_padrao_exige_obrigatorias_e_confere_o_tipo(sem_docker):
+    matematica = sem_docker.registro.resolver("builtin.matematica", 1)
+    incrementar = sem_docker.registro.resolver("builtin.var_incrementar", 1)
+    ex = _execucao_com_valores({"g": {"n": 4, "t": "quatro"}})
+
+    p = Passo(id="m", type=matematica.id, version=1, inputs={"a": _campo(ref("g", "n")), "b": _campo(lit(3))})
+    assert montar_entradas(ex, p, matematica, Limites()) == {"a": 4, "b": 3}
+    assert montar_entradas(ex, Passo(id="i", type=incrementar.id, version=1), incrementar, Limites()) == {"quantidade": 1}
+
+    with pytest.raises(ErroBloco) as faltando:
+        montar_entradas(ex, Passo(id="m", type=matematica.id, version=1, inputs={"a": _campo(lit(1))}), matematica, Limites())
+    assert faltando.value.codigo == "entrada_ausente" and "“B”" in faltando.value.mensagem
+
+    errado = Passo(id="m", type=matematica.id, version=1, inputs={"a": _campo(ref("g", "t")), "b": _campo(lit(3))})
+    with pytest.raises(ErroBloco) as tipo:
+        montar_entradas(ex, errado, matematica, Limites())
+    assert tipo.value.codigo == "entrada_invalida" and "“A” esperava número" in tipo.value.mensagem
+
+
+def _regras(*regras, combinador="e"):
+    return {"combinador": combinador, "regras": list(regras)}
+
+
+def test_regras_combinam_com_e_ou_e_comparam_conteudo_dinamico():
+    ex = _execucao_com_valores({"g": {"n": 5}})
+    maior = {"esq": ref("g", "n"), "op": "maior", "dir": lit(3)}
+    menor = {"esq": ref("g", "n"), "op": "menor", "dir": lit(3)}
+    assert avaliar_regras(ex, _regras(maior), Limites()) is True
+    assert avaliar_regras(ex, _regras(maior, menor), Limites()) is False
+    assert avaliar_regras(ex, _regras(maior, menor, combinador="ou"), Limites()) is True
+
+
+def test_regras_mal_formadas_viram_erro_de_parametro():
+    ex = _execucao_com_valores({})
+    with pytest.raises(ErroBloco) as exc:
+        avaliar_regras(ex, {"regras": []}, Limites())
+    assert exc.value.codigo == "parametro_invalido" and "Adicione ao menos uma condição" in exc.value.mensagem
