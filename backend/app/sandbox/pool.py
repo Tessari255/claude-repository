@@ -155,7 +155,8 @@ class PoolAquecido:
             self._lancadores.discard(threading.current_thread())
             if novo is None:
                 self._falhas += 1
-                espera = min(ESPERA_MAXIMA_S, 2.0 ** (self._falhas - 1))
+                # O expoente tem teto porque 2.0 ** 1024 estoura (OverflowError) e deixaria a espera valendo zero.
+                espera = min(ESPERA_MAXIMA_S, 2.0 ** min(self._falhas - 1, 10))
                 self._nao_antes = self._relogio() + espera
                 if self._falhas == 1:
                     log.warning("Não foi possível manter contêineres aquecidos; os trabalhos usam o caminho frio "

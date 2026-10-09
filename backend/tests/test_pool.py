@@ -16,7 +16,7 @@ from app.config import Limites, carregar_settings
 from app.main import criar_app
 from app.sandbox import DockerExecutor
 from app.sandbox.executor import CHAVE_ROTULO, ROTULO, ROTULO_POOL, SCRIPT_DO_POOL
-from app.sandbox.pool import Aquecido, PoolAquecido
+from app.sandbox.pool import ESPERA_MAXIMA_S, Aquecido, PoolAquecido
 
 
 class Fabrica:
@@ -204,6 +204,17 @@ def test_excecao_ao_iniciar_conta_como_falha_e_nao_derruba_a_reposicao(fabrica):
     fabrica.explodir = False
     esperar(lambda: pool.estado()["prontos"] == 1, limite_s=8)
     pool.encerrar()
+
+
+def test_muitas_falhas_seguidas_mantem_a_espera_no_teto_sem_estourar():
+    """A partir da 1025ª falha seguida, 2.0 ** (falhas - 1) estoura; a thread morria e o pool tentava de novo a cada varredura."""
+    agora = 1000.0
+    pool = PoolAquecido(1, 120.0, lambda: None, lambda lista: None, relogio=lambda: agora)
+    pool._falhas = 1024
+    pool._iniciando = 1
+    pool._lancar()
+    assert pool._nao_antes == agora + ESPERA_MAXIMA_S
+    assert pool._iniciando == 0 and pool._falhas == 1025
 
 
 def test_encerrar_descarta_os_prontos_e_quem_terminava_de_subir(fabrica):
