@@ -33,7 +33,7 @@ interface Opcoes {
   visao: VisaoDeExecucao
 }
 
-/** Testar o fluxo no contêiner e acompanhar, cancelar, rever execuções do histórico e reenviar uma delas. */
+/** Testar o fluxo no contêiner, acompanhar e cancelar a execução, e abrir uma execução do histórico em somente leitura. */
 export function useExecucao({ projectId, projetoCarregado, rascunhoAtual, revalidar, garantirDefs, visao }: Opcoes) {
   const notificar = useNotificar()
   const vivo = useVivo()

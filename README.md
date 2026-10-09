@@ -206,8 +206,10 @@ backend/app/   models (formato v2), passos (percorrer a árvore), validation (ve
                store (SQLite), exchange (export/import), custom_blocks, blocks/builtin.py (passos internos),
                sandbox/executor.py (Docker), api.py, main.py
 executor/      Dockerfile + runner.py (roda DENTRO do contêiner)
-frontend/src/  components/ (Designer, PainelPasso, CampoDinamico, Verificador, PainelTeste, Historico…),
-               lib/modelo.ts (operações puras sobre o fluxo), hooks/useHistorico.ts (desfazer/refazer), styles/theme.css
+frontend/src/  components/ (Designer, PainelPasso, CampoDinamico, Verificador, PainelTeste, Historico…; EditorPage só compõe),
+               hooks/ (estado com efeitos do editor: useProjeto, useCatalogo, useExecucao, useVisaoDeExecucao, useAtalhos,
+               useHistorico), lib/ (lógica pura, testada sem DOM: modelo, rascunho, execucao, acompanhamento, catalogo, atalhos),
+               styles/theme.css
 examples/      modelos de fluxo      scripts/      setup, start, build do executor
 ```
 

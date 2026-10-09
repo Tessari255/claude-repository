@@ -13,7 +13,7 @@ aninhados, conteúdo dinâmico tipado, "executar após", retentativas); verifica
 | Área | Problema | Onde |
 |---|---|---|
 | Latência do Python | Cada passo Python inicia um contêiner (≈1 s). Um `Para cada` com 50 itens e um passo Python dentro paga 50 inícios. Não há pool aquecido. | `backend/app/sandbox/executor.py` (semáforo de 4, `docker run` por chamada) |
-| Acompanhamento da execução | O editor faz *polling* a cada 300 ms em vez de receber eventos. | `frontend/src/components/EditorPage.tsx` (`dormir(300)`) |
+| Acompanhamento da execução | O editor faz *polling* a cada 300 ms em vez de receber eventos. | `frontend/src/hooks/useExecucao.ts` (`acompanharExecucao`; o polling de 300 ms está em `lib/acompanhamento.ts`) |
 | Só um gatilho | "Acionar manualmente" é o único gatilho; sem Recorrência a Trama é um executor de scripts com interface, não uma automação. | `backend/app/blocks/builtin.py` |
 | Escrever Python é cru | Sem autocompletar das entradas declaradas, sem lint antes de rodar, sem "testar só este passo" com os dados da última execução. | `CodeEditorInterno.tsx`, `PainelPasso.tsx` |
 | Só biblioteca padrão | Sem `pandas`, `numpy`, `dateutil`… | `executor/Dockerfile`, `executor/runner.py` |

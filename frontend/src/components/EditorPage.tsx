@@ -1,3 +1,6 @@
+// O editor é composição. Cada hook de src/hooks cuida de uma responsabilidade (projeto e rascunho, catálogo de blocos,
+// execução, visão de uma execução antiga, teclado); a lógica pura que eles usam fica em src/lib, onde o vitest a testa
+// sem DOM. Aqui ficam só o estado dos painéis, da seleção e dos diálogos, a ligação entre os hooks e o JSX.
 import { useCallback, useMemo, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import {
