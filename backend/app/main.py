@@ -88,7 +88,8 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
     settings = settings or carregar_settings()
     store = Store(settings.db_path)
     registro = Registro(store)
-    executor = executor or DockerExecutor(settings.imagem_executor, settings.limites, settings.docker_bin)
+    executor = executor or DockerExecutor(settings.imagem_executor, settings.limites, settings.docker_bin,
+                                          pool=settings.pool_tamanho, pool_ocioso_s=settings.pool_ocioso_s)
     motor = Motor(store, executor, registro, settings.limites)
     servicos = Servicos(settings, store, registro, executor, motor)
 
@@ -99,7 +100,8 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
             log.warning("%d execução(ões) interrompida(s) por reinício foram marcadas como falhas.", interrompidas)
         status = executor.status()
         if status.disponivel:
-            executor.cleanup_orphans()
+            executor.cleanup_orphans()  # inclui os ociosos do pool que uma API anterior deixou
+            executor.aquecer()
         else:
             log.warning("Executor isolado indisponível (%s). Código personalizado ficará desabilitado. %s",
                         status.motivo, status.instrucao)
@@ -107,6 +109,7 @@ def criar_app(settings: Settings | None = None, executor: DockerExecutor | None 
             semear_exemplos(store, registro, settings.pasta_exemplos)
         yield
         motor.encerrar()
+        executor.encerrar()  # remove os contêineres ociosos do pool
 
     # A documentação interativa carrega assets de um CDN externo no navegador; fica desligada por padrão.
     docs = os.environ.get("TRAMA_DOCS") == "1"

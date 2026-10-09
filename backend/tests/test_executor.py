@@ -12,9 +12,20 @@ import pytest
 from app.config import Limites
 from app.sandbox import DockerExecutor, limpar_segredos
 
-from .conftest import IMAGEM, LIMITES_TESTE
+from .conftest import IMAGEM, LIMITES_TESTE, esperar_prontos
 
 pytestmark = pytest.mark.docker
+
+
+@pytest.fixture(params=["frio", "pool"])
+def executor(request, executor):
+    """Todos os testes deste módulo rodam duas vezes: com um contêiner novo por trabalho (`frio`) e com o pool aquecido
+    (`pool`, sempre cheio no início de cada teste). O isolamento que se prova aqui tem de ser o mesmo nos dois caminhos."""
+    if request.param == "frio":
+        return executor
+    aquecido = request.getfixturevalue("executor_pool")
+    esperar_prontos(aquecido, 2)
+    return aquecido
 
 # O código abaixo contorna de propósito a lista de bibliotecas do runner (que é só
 # conveniência) para provar que o que protege é o CONTÊINER, não o filtro de imports.

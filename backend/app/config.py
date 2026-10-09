@@ -46,6 +46,9 @@ class Settings:
     imagem_executor: str = "trama-executor:2"
     docker_bin: str = "docker"
     limites: Limites = field(default_factory=Limites)
+    # Pool aquecido: contêineres já iniciados esperando o trabalho (0 desliga). Cada um atende UM trabalho e morre.
+    pool_tamanho: int = 2
+    pool_ocioso_s: float = 120.0  # vida máxima de um contêiner parado sem receber trabalho
     hosts_permitidos: tuple[str, ...] = ("localhost", "127.0.0.1", "[::1]", "testserver")
     origens_permitidas: tuple[str, ...] = ()
     semear_exemplos: bool = False  # os modelos aparecem na tela inicial; só semeia projetos prontos se TRAMA_SEED_EXAMPLES=1
@@ -57,7 +60,11 @@ class Settings:
         return self.data_dir / "trama.db"
 
 
+POOL_MAXIMO = 8
+
+
 def carregar_settings() -> Settings:
+    pool_ocioso_s = _float("TRAMA_POOL_OCIOSO_S", Settings.pool_ocioso_s)
     limites = Limites(
         tempo_s=_float("TRAMA_TIMEOUT_S", 10.0),
         memoria_mb=_int("TRAMA_MEMORY_MB", 256),
@@ -73,6 +80,8 @@ def carregar_settings() -> Settings:
         imagem_executor=os.environ.get("TRAMA_EXECUTOR_IMAGE", "trama-executor:2"),
         docker_bin=os.environ.get("TRAMA_DOCKER_BIN", "docker"),
         limites=limites,
+        pool_tamanho=min(max(_int("TRAMA_POOL", Settings.pool_tamanho), 0), POOL_MAXIMO),
+        pool_ocioso_s=pool_ocioso_s if pool_ocioso_s > 0 else Settings.pool_ocioso_s,
         hosts_permitidos=tuple(h.strip() for h in hosts.split(",")) if hosts else Settings().hosts_permitidos,
         origens_permitidas=tuple(o.strip() for o in os.environ.get("TRAMA_ALLOWED_ORIGINS", "").split(",") if o.strip()),
         semear_exemplos=os.environ.get("TRAMA_SEED_EXAMPLES", "0") == "1",

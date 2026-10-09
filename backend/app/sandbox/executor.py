@@ -13,6 +13,12 @@ contêiner novo e descartável, com:
 O host ainda impõe: tempo de parede (abate com ``docker kill``), teto de bytes lidos
 de stdout/stderr e tamanho máximo da entrada.
 
+Pool aquecido (``pool`` > 0): para esconder o custo de iniciar o Docker, alguns contêineres ficam já iniciados
+esperando o trabalho no stdin (``pool.py``). A regra continua sendo UM contêiner por trabalho: quem recebe um trabalho
+sai do pool para sempre e é removido ao terminar. Os limites do trabalho (tempo, CPU, vigia) só passam a valer quando
+ele chega; até lá o contêiner ocioso se mata sozinho em ``pool_ocioso_s`` (e logo que a API morre).
+Teto de contêineres vivos: no máximo 4 de trabalho (``max_paralelo``) + ``pool`` ociosos ou subindo.
+
 Se o Docker ou a imagem não estiverem disponíveis, ``status()`` informa o motivo e
 ``run()`` falha de forma explícita — nunca há execução sem isolamento como alternativa.
 """
@@ -33,11 +39,29 @@ from dataclasses import dataclass, field
 from typing import Any, TypeGuard
 
 from ..config import Limites
+from .pool import Aquecido, PoolAquecido
 
 log = logging.getLogger("trama.sandbox")
 
 PREFIXO = "\x1e@@TRAMA@@"
 ROTULO = "trama.executor=1"
+# Mesma chave, outro valor: o saneamento de órfãos (``label=trama.executor``) cobre os dois, e quem olha o Docker
+# distingue o contêiner de trabalho do que está só esperando.
+ROTULO_POOL = "trama.executor=pool"
+CHAVE_ROTULO = "trama.executor"
+PRONTO = b"PRONTO"
+PARTIDA_MAX_S = 30.0  # quanto esperar um contêiner do pool avisar que subiu
+
+# PID 1 de um contêiner do pool (constante nossa, sem dado do usuário). Espera a linha de partida do host
+# ``<vigia_s> <cpu_s>``; se ela não vier em ``$1`` segundos ou o host fechar o stdin (a API morreu), o contêiner sai.
+# Chegando, aperta o limite de CPU para o valor do trabalho (só dá para diminuir o que o ``docker run`` fixou) e vira
+# ``timeout`` por ``exec``, ainda como PID 1: o vigia do trabalho começa a contar AGORA, igual ao do caminho frio.
+SCRIPT_DO_POOL = r"""echo PRONTO
+trap 'exit 0' TERM
+IFS=' ' read -r -t "$1" vigia cpu || exit 0
+[[ $vigia =~ ^[0-9]+$ && $cpu =~ ^[0-9]+$ ]] || exit 64
+ulimit -S -t "$cpu" && ulimit -H -t "$((cpu + 1))" || exit 65
+exec timeout -s KILL "$vigia" python -I /opt/trama/runner.py"""
 
 _SEGREDOS = [
     re.compile(r"(?i)\b(api[_-]?key|token|secret|password|senha|passwd)\b(\s*[=:]\s*)(\S+)"),
@@ -108,15 +132,20 @@ def _erro(categoria: str, mensagem: str, **extra: Any) -> dict[str, Any]:
     return base
 
 
+class _NaoEntregue(Exception):
+    """O contêiner do pool morreu parado e não recebeu o trabalho: nada do código do usuário rodou."""
+
+
 class DockerExecutor:
     def __init__(self, imagem: str, limites: Limites, docker_bin: str = "docker",
-                 max_paralelo: int = 4) -> None:
+                 max_paralelo: int = 4, pool: int = 0, pool_ocioso_s: float = 120.0) -> None:
         self.imagem = imagem
         self.limites = limites
         self.docker_bin = docker_bin
         self._semaforo = threading.BoundedSemaphore(max_paralelo)
         self._cache: tuple[float, ExecutorStatus] | None = None
         self._lock = threading.Lock()
+        self._pool = PoolAquecido(pool, pool_ocioso_s, self._iniciar_aquecido, self._descartar_aquecidos)
 
     # ------------------------------------------------------------------ status
     def status(self, forcar: bool = False) -> ExecutorStatus:
@@ -175,7 +204,7 @@ class DockerExecutor:
             return 0
         try:
             ids = subprocess.run(
-                [self.docker_bin, "ps", "-aq", "--filter", f"label={ROTULO}"],
+                [self.docker_bin, "ps", "-aq", "--filter", f"label={CHAVE_ROTULO}"],  # trabalho (=1) e pool (=pool)
                 capture_output=True, text=True, timeout=10,
             ).stdout.split()
             if ids:
@@ -185,15 +214,23 @@ class DockerExecutor:
             return 0
 
     # --------------------------------------------------------------- execução
-    def _comando(self, nome: str, limites: Limites) -> list[str]:
-        mem = limites.memoria_mb + 64  # folga para o interpretador; o limite fino é o RLIMIT_AS do runner
-        cpu_brando = int(limites.tempo_s) + 3
+    @staticmethod
+    def _cpu_brando(limites: Limites) -> int:
+        return int(limites.tempo_s) + 3
+
+    @staticmethod
+    def _vigia_s(limites: Limites) -> int:
         # Vigia dentro do contêiner (`timeout` é o PID 1): só dispara se o host morrer, por isso fica
         # depois do abate normal feito pelo host.
-        vigia = int(limites.tempo_s + limites.folga_inicio_s) + 5
+        return int(limites.tempo_s + limites.folga_inicio_s) + 5
+
+    def _opcoes(self, nome: str, limites: Limites, rotulo: str) -> list[str]:
+        """Tudo o que isola o contêiner. É o mesmo para o caminho frio e para o pool: os dois passam por aqui."""
+        mem = limites.memoria_mb + 64  # folga para o interpretador; o limite fino é o RLIMIT_AS do runner
+        cpu_brando = self._cpu_brando(limites)
         return [
             self.docker_bin, "run", "-i",
-            "--name", nome, "--label", ROTULO,
+            "--name", nome, "--label", rotulo,
             "--pull", "never",           # nunca baixar imagem no meio de uma execução
             "--log-driver", "none",      # a saída já vem pelo pipe; não duplica em disco no host
             "--network", "none",
@@ -212,9 +249,25 @@ class DockerExecutor:
             "--security-opt", "no-new-privileges",
             "--user", "65534:65534",
             "--ipc", "none",
-            self.imagem,
-            str(vigia), "python", "-I", "/opt/trama/runner.py",
         ]
+
+    def _comando(self, nome: str, limites: Limites) -> list[str]:
+        return [*self._opcoes(nome, limites, ROTULO), self.imagem,
+                str(self._vigia_s(limites)), "python", "-I", "/opt/trama/runner.py"]
+
+    def _comando_pool(self, nome: str) -> list[str]:
+        """Contêiner ocioso: os limites de recursos são os do padrão do executor (o trabalho só pode apertá-los)."""
+        return [*self._opcoes(nome, self.limites, ROTULO_POOL), "--entrypoint", "bash", self.imagem,
+                "-c", SCRIPT_DO_POOL, "bash", f"{self._pool.ocioso_s:.3f}"]
+
+    def _cabe_no_pool(self, limites: Limites) -> bool:
+        """Só um trabalho cujos limites o contêiner ocioso já respeita (ou que são mais apertados) pode usá-lo.
+        Memória, CPUs e processos são fixados pelo ``docker run`` e não dá para apertá-los depois; o tempo de CPU e o vigia
+        são ajustados por trabalho na linha de partida."""
+        base = self.limites
+        return (limites.memoria_mb == base.memoria_mb and limites.cpus == base.cpus
+                and limites.max_processos == base.max_processos
+                and self._cpu_brando(limites) <= self._cpu_brando(base))
 
     def run(self, mode: str, code: str, inputs: dict | None = None,
             params: dict | None = None, items: list | None = None,
@@ -246,11 +299,81 @@ class DockerExecutor:
                 f"Os dados enviados ao código são grandes demais (limite de {tamanho_max // 1024} KB)."))
 
         with self._semaforo:
+            aquecido = self._retirar_aquecido(limites)
+            if aquecido is not None:
+                try:
+                    return self._rodar(corpo, token, limites, aquecido.nome, aquecido)
+                except _NaoEntregue:
+                    log.warning("O contêiner aquecido morreu antes de receber o trabalho; usando o caminho frio.")
+                finally:
+                    self._remover(aquecido.nome)
             nome = f"trama-{uuid.uuid4().hex[:12]}"
             try:
                 return self._rodar(corpo, token, limites, nome)
             finally:
                 self._remover(nome)  # sem --rm: o contêiner precisa existir até lermos o motivo do encerramento
+
+    # ------------------------------------------------------------------- pool
+    def aquecer(self) -> None:
+        """Liga o pool (se configurado) e começa a encher em segundo plano. Idempotente."""
+        self._pool.ativar()
+
+    def encerrar(self) -> None:
+        """Remove os contêineres ociosos e para a reposição. Um novo trabalho religa o pool sozinho."""
+        self._pool.encerrar()
+
+    def estado_pool(self) -> dict[str, Any]:
+        return self._pool.estado()
+
+    def _retirar_aquecido(self, limites: Limites) -> Aquecido | None:
+        if self._pool.tamanho <= 0:
+            return None
+        self._pool.ativar()
+        return self._pool.retirar() if self._cabe_no_pool(limites) else None
+
+    def _iniciar_aquecido(self) -> Aquecido | None:
+        """Sobe um contêiner ocioso e espera ele avisar (``PRONTO``) que está esperando o trabalho."""
+        if not self.status().disponivel:
+            return None
+        nome = f"trama-{uuid.uuid4().hex[:12]}"
+        criado_em = time.monotonic()
+        try:
+            proc = subprocess.Popen(self._comando_pool(nome), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+        except OSError as exc:
+            log.warning("Falha ao iniciar o docker para o pool: %s", exc)
+            return None
+        saida = proc.stdout
+        assert saida is not None  # Popen com stdout=PIPE
+        linha: list[bytes] = []
+        leitor = threading.Thread(target=lambda: linha.append(saida.readline()), daemon=True)
+        leitor.start()
+        leitor.join(PARTIDA_MAX_S)
+        aquecido = Aquecido(nome, proc, criado_em)
+        if linha and linha[0].strip() == PRONTO:
+            return aquecido
+        with contextlib.suppress(OSError):
+            proc.kill()  # destrava o leitor se ele ainda esperava; o contêiner some em _descartar_aquecidos
+        erro = proc.stderr.read(2000) if proc.stderr else b""
+        log.warning("O contêiner do pool não ficou pronto: %s", limpar_segredos(erro.decode("utf-8", "replace")).strip())
+        self._descartar_aquecidos([aquecido])
+        return None
+
+    def _descartar_aquecidos(self, aquecidos: list[Aquecido]) -> None:
+        """Remove contêineres ociosos (mortos, vencidos ou sobrando no desligamento)."""
+        if not aquecidos:
+            return
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            subprocess.run([self.docker_bin, "rm", "-f", *[q.nome for q in aquecidos]], capture_output=True, timeout=30)
+        for q in aquecidos:
+            with contextlib.suppress(OSError):
+                q.proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                q.proc.wait(timeout=5)
+            for fluxo in (q.proc.stdin, q.proc.stdout, q.proc.stderr):
+                if fluxo is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        fluxo.close()
 
     def _remover(self, nome: str) -> None:
         try:
@@ -266,7 +389,8 @@ class DockerExecutor:
         except (subprocess.TimeoutExpired, OSError):
             return False
 
-    def _rodar(self, corpo: bytes, token: str, limites: Limites, nome: str) -> SandboxResult:
+    def _rodar(self, corpo: bytes, token: str, limites: Limites, nome: str,
+               aquecido: Aquecido | None = None) -> SandboxResult:
         # O resultado pode crescer até ~6x ao ser escapado em JSON (controles viram \u00XX); o teto cobre isso
         # para não abater por engano uma resposta legítima.
         cap_stdout = 6 * (limites.valor_max + limites.logs_max) + 65536
@@ -288,26 +412,33 @@ class DockerExecutor:
             except (OSError, ValueError):
                 return
 
-        inicio = time.monotonic()
-        try:
-            proc = subprocess.Popen(
-                self._comando(nome, limites),
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-        except OSError as exc:
-            log.error("Falha ao iniciar o docker: %s", exc)
-            return SandboxResult(False, error=_erro(
-                "executor_indisponivel", "Não foi possível iniciar o executor isolado."))
+        inicio = time.monotonic()  # o tempo de parede do trabalho conta daqui, não de quando o contêiner ocioso subiu
+        envio = corpo
+        if aquecido is None:
+            try:
+                proc = subprocess.Popen(
+                    self._comando(nome, limites),
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            except OSError as exc:
+                log.error("Falha ao iniciar o docker: %s", exc)
+                return SandboxResult(False, error=_erro(
+                    "executor_indisponivel", "Não foi possível iniciar o executor isolado."))
+        else:
+            proc = aquecido.proc
+            # A linha de partida só leva números calculados aqui; o trabalho (JSON) vem logo depois, como no caminho frio.
+            envio = f"{self._vigia_s(limites)} {self._cpu_brando(limites)}\n".encode("ascii") + corpo
 
         entrada = proc.stdin
         assert entrada is not None  # Popen com stdin=PIPE
+        falha_no_envio = threading.Event()
 
         def escrever() -> None:
             try:
-                entrada.write(corpo)
+                entrada.write(envio)
                 entrada.close()
             except (BrokenPipeError, OSError, ValueError):
-                pass
+                falha_no_envio.set()
 
         threads = [
             threading.Thread(target=escrever, daemon=True),
@@ -337,6 +468,9 @@ class DockerExecutor:
         for t in threads:
             t.join(timeout=2)
         duracao = int((time.monotonic() - inicio) * 1000)
+        # Com o cliente já encerrado, o trabalho (JSON completo) não chegou ao runner: nada do usuário rodou.
+        if aquecido is not None and motivo_abate is None and falha_no_envio.is_set() and not saida:
+            raise _NaoEntregue
 
         if motivo_abate == "tempo_esgotado":
             return SandboxResult(False, duration_ms=duracao, error=_erro(

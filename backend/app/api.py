@@ -103,6 +103,7 @@ def criar_router(s: Servicos) -> APIRouter:
         return {
             "name": "Trama", "version": "0.1.0",
             "executor": s.executor.status().como_dict(),
+            "pool": s.executor.estado_pool(),
             "limits": {"time_s": lim.tempo_s, "memory_mb": lim.memoria_mb, "cpus": lim.cpus,
                        "value_kb": lim.valor_max // 1024, "logs_kb": lim.logs_max // 1024,
                        "max_list_items": lim.itens_max_lista},
