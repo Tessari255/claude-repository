@@ -11,6 +11,7 @@ Este módulo não conhece o Docker: quem inicia e remove contêineres é o execu
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import threading
 import time
@@ -37,8 +38,8 @@ class Aquecido:
 class PoolAquecido:
     def __init__(self, tamanho: int, ocioso_s: float, iniciar: Callable[[], Aquecido | None],
                  descartar: Callable[[list[Aquecido]], None], relogio: Callable[[], float] = time.monotonic) -> None:
-        if tamanho > 0 and ocioso_s <= 0:
-            raise ValueError("O tempo ocioso do pool precisa ser positivo.")
+        if tamanho > 0 and (not math.isfinite(ocioso_s) or ocioso_s <= 0):
+            raise ValueError("O tempo ocioso do pool precisa ser um número finito e positivo.")
         self.tamanho = max(0, tamanho)
         self.ocioso_s = ocioso_s
         # O contêiner se mata em ``ocioso_s``; o host o troca um pouco antes, para nunca entregar um trabalho a quem está morrendo.

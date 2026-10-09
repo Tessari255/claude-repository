@@ -61,6 +61,10 @@ class Settings:
 
 
 POOL_MAXIMO = 8
+# Fora desta faixa o contêiner morreria logo depois de ficar pronto (tempo menor que a subida, ou um `read -t` que o bash recusa,
+# como `inf` e valores a partir de 2**63) e o pool viveria subindo e removendo contêineres sem servir nenhum trabalho.
+POOL_OCIOSO_MINIMO_S = 5.0
+POOL_OCIOSO_MAXIMO_S = 86_400.0
 
 
 def carregar_settings() -> Settings:
@@ -81,7 +85,7 @@ def carregar_settings() -> Settings:
         docker_bin=os.environ.get("TRAMA_DOCKER_BIN", "docker"),
         limites=limites,
         pool_tamanho=min(max(_int("TRAMA_POOL", Settings.pool_tamanho), 0), POOL_MAXIMO),
-        pool_ocioso_s=pool_ocioso_s if pool_ocioso_s > 0 else Settings.pool_ocioso_s,
+        pool_ocioso_s=pool_ocioso_s if POOL_OCIOSO_MINIMO_S <= pool_ocioso_s <= POOL_OCIOSO_MAXIMO_S else Settings.pool_ocioso_s,
         hosts_permitidos=tuple(h.strip() for h in hosts.split(",")) if hosts else Settings().hosts_permitidos,
         origens_permitidas=tuple(o.strip() for o in os.environ.get("TRAMA_ALLOWED_ORIGINS", "").split(",") if o.strip()),
         semear_exemplos=os.environ.get("TRAMA_SEED_EXAMPLES", "0") == "1",

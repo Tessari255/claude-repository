@@ -347,6 +347,15 @@ def test_script_do_pool_sai_sozinho_quando_o_tempo_ocioso_acaba(script_do_pool):
     ({"TRAMA_POOL": "abc", "TRAMA_POOL_OCIOSO_S": "xyz"}, 2, 120.0),
     ({"TRAMA_POOL_OCIOSO_S": "0"}, 2, 120.0),
     ({"TRAMA_POOL_OCIOSO_S": "-5"}, 2, 120.0),
+    ({"TRAMA_POOL_OCIOSO_S": "inf"}, 2, 120.0),  # o `read -t inf` do bash é recusado e o contêiner morreria logo depois de ficar pronto
+    ({"TRAMA_POOL_OCIOSO_S": "-inf"}, 2, 120.0),
+    ({"TRAMA_POOL_OCIOSO_S": "nan"}, 2, 120.0),
+    ({"TRAMA_POOL_OCIOSO_S": "1"}, 2, 120.0),  # menor que a subida do contêiner
+    ({"TRAMA_POOL_OCIOSO_S": "4.9"}, 2, 120.0),
+    ({"TRAMA_POOL_OCIOSO_S": "5"}, 2, 5.0),
+    ({"TRAMA_POOL_OCIOSO_S": "86400"}, 2, 86400.0),
+    ({"TRAMA_POOL_OCIOSO_S": "86401"}, 2, 120.0),
+    ({"TRAMA_POOL_OCIOSO_S": "1e30"}, 2, 120.0),  # a partir de 2**63 o bash também recusa o tempo
 ])
 def test_variaveis_de_ambiente_do_pool(monkeypatch, ambiente, tamanho, ocioso_s):
     for nome in ("TRAMA_POOL", "TRAMA_POOL_OCIOSO_S"):
@@ -355,6 +364,13 @@ def test_variaveis_de_ambiente_do_pool(monkeypatch, ambiente, tamanho, ocioso_s)
         monkeypatch.setenv(nome, valor)
     s = carregar_settings()
     assert (s.pool_tamanho, s.pool_ocioso_s) == (tamanho, ocioso_s)
+
+
+@pytest.mark.parametrize("ocioso_s", [float("inf"), float("-inf"), float("nan"), 0.0, -1.0])
+def test_pool_montado_direto_recusa_tempo_ocioso_invalido(ocioso_s):
+    with pytest.raises(ValueError, match="tempo ocioso"):
+        PoolAquecido(2, ocioso_s, lambda: None, lambda lista: None)
+    assert PoolAquecido(0, ocioso_s, lambda: None, lambda lista: None).tamanho == 0  # desligado: o tempo não importa
 
 
 def test_a_aplicacao_monta_o_executor_com_o_pool_das_configuracoes(settings):

@@ -258,7 +258,7 @@ O histórico de execuções antigas **não é convertido** (ele descrevia blocos
 | `TRAMA_DATA_DIR` | `./data` | onde fica o banco SQLite |
 | `TRAMA_EXECUTOR_IMAGE` | `trama-executor:2` | imagem do executor |
 | `TRAMA_TIMEOUT_S` / `TRAMA_MEMORY_MB` / `TRAMA_CPUS` / `TRAMA_PIDS` | `10` / `256` / `1` / `64` | limites do código Python |
-| `TRAMA_POOL` / `TRAMA_POOL_OCIOSO_S` | `2` / `120` | contêineres aquecidos esperando trabalho (`0` desliga; no máximo 8) e quanto um deles pode ficar parado sem receber trabalho |
+| `TRAMA_POOL` / `TRAMA_POOL_OCIOSO_S` | `2` / `120` | contêineres aquecidos esperando trabalho (`0` desliga; no máximo 8) e quanto um deles pode ficar parado sem receber trabalho (de 5 a 86400 s; fora disso vale o padrão) |
 | `TRAMA_LOGS_KB` / `TRAMA_VALUE_KB` / `TRAMA_MAX_LIST_ITEMS` | `64` / `1024` / `10000` | volume de logs, tamanho de cada valor, itens por lista |
 | `TRAMA_HOST` / `TRAMA_PORT` | `127.0.0.1` / `8000` | só local por padrão (não há autenticação) |
 | `TRAMA_ALLOWED_HOSTS` / `TRAMA_ALLOWED_ORIGINS` | localhost… / vazio | proteção contra requisições de outros sites |
