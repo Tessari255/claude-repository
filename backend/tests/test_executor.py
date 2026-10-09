@@ -11,6 +11,7 @@ import pytest
 
 from app.config import Limites
 from app.sandbox import DockerExecutor, limpar_segredos
+from app.sandbox.executor import CHAVE_ROTULO, ROTULO
 
 from .conftest import IMAGEM, LIMITES_TESTE, esperar_prontos
 
@@ -35,6 +36,28 @@ BYPASS = "real = __import__.__closure__[0].cell_contents\n"
 def rodar(executor, codigo, entradas=None, params=None, **limites):
     lim = dataclasses.replace(LIMITES_TESTE, **limites) if limites else None
     return executor.run("block", codigo, entradas or {}, params or {}, limits=lim)
+
+
+def sobras(executor) -> list[str]:
+    """IDs de contêineres de trabalho que continuam existindo (vivos ou parados) depois de um trabalho; [] se nada vazou.
+
+    Sem pool o contêiner de trabalho tem o rótulo `trama.executor=1`. Com pool ele é um ocioso que foi usado e carrega o
+    rótulo `pool`, igual ao dos ociosos repostos, então o filtro é pela chave e a conta desconta os ociosos do pool."""
+    def listar(rotulo: str) -> list[str]:
+        return subprocess.run(["docker", "ps", "-aq", "--filter", f"label={rotulo}"], capture_output=True, text=True).stdout.split()
+
+    ociosos = executor.estado_pool()["configurado"]
+    if not ociosos:
+        return listar(ROTULO)
+    fim = time.monotonic() + 10  # tolera a troca de um ocioso vencido, que existe por instantes ao lado do substituto
+    while True:
+        esperar_prontos(executor, ociosos)
+        ids = listar(CHAVE_ROTULO)
+        if len(ids) <= ociosos:
+            return []
+        if time.monotonic() > fim:
+            return ids
+        time.sleep(0.1)
 
 
 def test_execucao_real_devolve_saidas_e_logs(executor):
@@ -79,10 +102,7 @@ def test_codigo_que_engole_o_limite_brando_e_abatido_pelo_host(executor):
     )
     r = rodar(executor, codigo, tempo_s=1, folga_inicio_s=3)
     assert not r.ok and r.error["category"] == "tempo_esgotado"
-    # o contêiner não pode ter ficado vivo
-    vivos = subprocess.run(["docker", "ps", "-q", "--filter", "label=trama.executor=1"],
-                           capture_output=True, text=True).stdout.split()
-    assert vivos == []
+    assert sobras(executor) == []  # o contêiner não pode ter ficado vivo
 
 
 def test_limite_de_memoria_com_memory_error(executor):
@@ -234,8 +254,7 @@ def test_bomba_de_processos_e_contida_pelo_limite_de_pids(executor):
     r = rodar(executor, codigo, tempo_s=8)
     assert r.ok, r.error
     assert 0 < r.payload["outputs"]["filhos"] < LIMITES_TESTE.max_processos  # o kernel recusou o resto
-    vivos = subprocess.run(["docker", "ps", "-q", "--filter", "label=trama.executor=1"], capture_output=True, text=True).stdout.split()
-    assert vivos == []  # e nada sobrou rodando depois
+    assert sobras(executor) == []  # e nada sobrou rodando depois
 
 
 def test_sistema_de_arquivos_somente_leitura_e_usuario_sem_privilegios(executor):
