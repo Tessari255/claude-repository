@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from app.blocks.builtin import ContextoBloco
 from app.config import Limites
 from app.dinamico import avaliar_regras, montar_entradas, resolver_campo, valor_da_ref
 from app.errors import ErroBloco
@@ -20,13 +21,15 @@ from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
 from app.execucao import MAX_REGISTROS, Cancelado, Execucao, chave_etapa, falha_de
 from app.historico import Historico
 from app.models import Campo, Flow, Passo, Ref
+from app.passos_simples import PassosSimples
+from app.sandbox import ExecutorStatus, SandboxResult
 
-from .helpers import campo, compor, fluxo, lit, passo, ref, saida, tpl
+from .helpers import campo, compor, fluxo, lit, passo, python_inline, ref, saida, tpl
 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -264,3 +267,80 @@ def test_regras_mal_formadas_viram_erro_de_parametro():
     with pytest.raises(ErroBloco) as exc:
         avaliar_regras(ex, {"regras": []}, Limites())
     assert exc.value.codigo == "parametro_invalido" and "Adicione ao menos uma condição" in exc.value.mensagem
+
+
+# ------------------------------------------------------------------ passos simples (executor isolado simulado)
+class ExecutorFalso:
+    """Faz o papel do executor isolado: devolve o que o teste mandar e guarda o que recebeu."""
+
+    def __init__(self, resposta: SandboxResult | None = None, disponivel: bool = True) -> None:
+        self.resposta = resposta or SandboxResult(ok=True, payload={"outputs": {"mensagem": "ok"}})
+        self.disponivel = disponivel
+        self.chamadas: list[dict] = []
+
+    def status(self, forcar: bool = False) -> ExecutorStatus:
+        return ExecutorStatus(disponivel=self.disponivel, imagem="falsa", motivo=None if self.disponivel else "docker_ausente",
+                              mensagem=None if self.disponivel else "Sem Docker.", instrucao="Instale o Docker.")
+
+    def run(self, mode, code, inputs=None, params=None, items=None, limits=None):
+        self.chamadas.append({"mode": mode, "code": code, "inputs": inputs, "limits": limits})
+        return self.resposta
+
+
+def _rodar_python(sem_docker, executor, limites=None, **kw):
+    """Executa um passo de código Python inline pelo PassosSimples e devolve as saídas."""
+    limites = limites or Limites()
+    p = Passo.model_validate(python_inline("p", "def run(inputs, params):\n    return {}", {"n": ("numero", lit(2))}, {"mensagem": "texto"}, **kw))
+    historico, ex = _execucao_com_linha(sem_docker.store, etapas=("p",))
+    ctx = ContextoBloco(limites=limites)
+    simples = PassosSimples(historico, executor, limites)
+    return simples.executar_folha(ex, p, sem_docker.registro.resolver("builtin.python", 1), (), ctx), ctx, ex
+
+
+def test_resposta_valida_do_executor_vira_as_saidas_e_os_logs_do_passo(sem_docker):
+    executor = ExecutorFalso(SandboxResult(ok=True, payload={"outputs": {"mensagem": "olá"}},
+                                           logs=[{"source": "stdout", "text": "oi"}]))
+    saidas, ctx, ex = _rodar_python(sem_docker, executor)
+    assert saidas == {"mensagem": "olá"} and ex.valores["p"] == {"mensagem": "olá"}
+    assert ctx.logs == [{"source": "stdout", "text": "oi"}]
+    assert executor.chamadas[0]["mode"] == "block" and executor.chamadas[0]["inputs"] == {"n": 2}
+    assert sem_docker.store.obter_execucao(ex.run_id)["steps"][0]["inputs"] == {"n": 2}  # as entradas ficam no histórico
+
+
+@pytest.mark.parametrize("saidas,codigo,trecho", [
+    ({}, "retorno_invalido", "não devolveu a saída declarada"),
+    ({"mensagem": "x", "extra": 1}, "retorno_invalido", "extra"),
+    ({"mensagem": 42}, "retorno_invalido", "deveria ser texto"),
+    ({"mensagem": {1, 2}}, "retorno_invalido", "JSON"),
+    ("texto solto", "retorno_invalido", "não é um dicionário"),
+    ({"mensagem": "x" * 200}, "valor_grande_demais", "grande demais"),
+])
+def test_resposta_do_executor_nao_e_confiavel_e_e_conferida_contra_o_contrato(sem_docker, saidas, codigo, trecho):
+    executor = ExecutorFalso(SandboxResult(ok=True, payload={"outputs": saidas}))
+    with pytest.raises(ErroBloco) as exc:
+        _rodar_python(sem_docker, executor, Limites(valor_max=100))
+    assert exc.value.codigo == codigo and trecho in exc.value.mensagem
+
+
+def test_erro_do_executor_chega_traduzido_e_o_passo_e_tentado_de_novo(sem_docker):
+    executor = ExecutorFalso(SandboxResult(ok=False, error={"category": "excecao", "type": "ZeroDivisionError", "message": "x", "line": 2},
+                                           logs=[{"source": "stderr", "text": "Traceback"}]))
+    with pytest.raises(ErroBloco) as exc:
+        _rodar_python(sem_docker, executor, retry=2)
+    assert exc.value.codigo == "excecao_python" and "dividir por zero" in exc.value.mensagem
+    assert len(executor.chamadas) == 3  # a primeira tentativa mais as 2 repetições pedidas
+
+
+def test_sem_executor_disponivel_o_codigo_nao_roda_em_lugar_nenhum(sem_docker):
+    executor = ExecutorFalso(disponivel=False)
+    with pytest.raises(ErroBloco) as exc:
+        _rodar_python(sem_docker, executor)
+    assert exc.value.codigo == "executor_indisponivel" and exc.value.sugestao == "Instale o Docker."
+    assert executor.chamadas == []
+
+
+@pytest.mark.parametrize("timeout_do_passo,esperado", [(1.0, 1.0), (60.0, 5.0), (None, 5.0)])
+def test_tempo_do_passo_so_pode_diminuir_o_limite_do_executor(sem_docker, timeout_do_passo, esperado):
+    executor = ExecutorFalso()
+    _rodar_python(sem_docker, executor, Limites(tempo_s=5.0), timeout=timeout_do_passo)
+    assert executor.chamadas[0]["limits"].tempo_s == esperado
