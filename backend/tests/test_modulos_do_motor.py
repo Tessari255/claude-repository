@@ -6,9 +6,11 @@ de arquitetura (quem importa quem, quem escreve o histórico)."""
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 
@@ -19,12 +21,13 @@ from app.config import Limites
 from app.controle import Controle, deve_rodar, motivo_ignorado
 from app.despacho import Despacho
 from app.dinamico import avaliar_regras, montar_entradas, resolver_campo, valor_da_ref
-from app.errors import ErroBloco
+from app.errors import ApiError, ErroBloco
 from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
 from app.execucao import MAX_REGISTROS, Cancelado, Encerrado, Execucao, Resultado, chave_etapa, falha_de
 from app.historico import Historico
 from app.models import Campo, Flow, Passo, Ref
 from app.passos_simples import PassosSimples
+from app.preparo import preparar_execucao
 from app.sandbox import DockerExecutor, ExecutorStatus, SandboxResult
 
 from .helpers import campo, compor, condicao, fluxo, lit, matematica, passo, python_inline, ref, saida, tpl
@@ -32,7 +35,7 @@ from .helpers import campo, compor, condicao, fluxo, lit, matematica, passo, pyt
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "despacho", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "despacho", "preparo", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -568,3 +571,41 @@ def test_bloco_com_passo_de_dentro_que_falhou_aponta_o_passo_e_guarda_o_resumo(s
     assert linhas[("tentar", ())]["error"]["code"] == "falha_em_passo_interno"
     assert linhas[("tentar", ())]["error"]["message"] == "O passo “Dividir” dentro deste bloco falhou: Não é possível dividir por zero."
     assert linhas[("tentar", ())]["outputs"]["falhou"] is True and linhas[("div", ())]["state"] == "falhou"
+
+
+# ------------------------------------------------------------------ preparo da execução
+def _preparar(sem_docker, f, dados=None):
+    return preparar_execucao(Flow.model_validate(f), None, dados, registro=sem_docker.registro, executor=sem_docker.executor,
+                             limites=Limites(), historico=Historico(sem_docker.store))
+
+
+def test_preparo_congela_o_fluxo_e_as_definicoes_e_cria_so_as_linhas_fora_de_laco(sem_docker):
+    laco = passo("laco", "builtin.para_cada", {"lista": lit([1])}, {"limite": 5}, slots={"corpo": [compor("dentro", lit(1))]})
+    f = fluxo([laco, condicao("c", lit(1), "igual", "1", sim=[compor("ramo", lit(1))])], [campo("n", "numero", 3)])
+    run = sem_docker.store.obter_execucao(_preparar(sem_docker, f, {"n": 9}), com_snapshot=True)
+    assert run["state"] == "aguardando" and run["trigger_inputs"] == {"n": 9}
+    assert [s["step_id"] for s in run["steps"]] == ["gatilho", "laco", "c", "ramo"]  # "dentro" nasce a cada repetição
+    snap = run["snapshot"]
+    assert snap["flow"] == Flow.model_validate(f).model_dump() and snap["trigger_inputs"] == {"n": 9}
+    assert {"builtin.gatilho_manual@1", "builtin.para_cada@1", "builtin.condicao@1", "builtin.compor@1"} <= set(snap["definitions"])
+    assert "laco" in snap["port_types"]
+
+
+def test_preparo_recusa_fluxo_invalido_sem_criar_execucao_nenhuma(sem_docker, settings):
+    invalido = fluxo([passo("m", "builtin.matematica", {"a": lit(1)}, {"operacao": "somar"})])  # falta a entrada B
+    with pytest.raises(ApiError) as exc:
+        _preparar(sem_docker, invalido)
+    assert exc.value.status == 422 and exc.value.codigo == "fluxo_invalido" and exc.value.problemas
+    with closing(sqlite3.connect(settings.db_path)) as c:
+        assert c.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_dados_do_gatilho_com_varios_problemas_sao_apontados_de_uma_vez(sem_docker):
+    f = fluxo([compor("c", lit(1))], [campo("nome", "texto", required=True), campo("idade", "numero", 18)])
+    with pytest.raises(ApiError) as exc:
+        _preparar(sem_docker, f, {"idade": "vinte", "extra": 1})
+    mensagens = sorted(p["message"] for p in exc.value.problemas)
+    assert exc.value.codigo == "dados_invalidos" and len(mensagens) == 3
+    assert any("não tem o campo “extra”" in m for m in mensagens)
+    assert any("“Idade” deveria ser número" in m for m in mensagens)
+    assert any(m == "Preencha o campo “Nome” do gatilho." for m in mensagens)
