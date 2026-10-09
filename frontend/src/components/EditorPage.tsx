@@ -4,7 +4,7 @@ import {
   achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
   remover, todosOsPassos, usaOPasso, MAX_PROFUNDIDADE, type Destino,
 } from '../lib/modelo'
-import { useHistorico } from '../lib/useHistorico'
+import { useHistorico } from '../hooks/useHistorico'
 import { slugDeId } from '../lib/visual'
 import type { BlockType, Flow, Issue, Passo, PortTypes, Project, Run, SystemInfo } from '../types'
 import { BlockEditorDialog } from './BlockEditorDialog'

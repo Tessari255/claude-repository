@@ -207,7 +207,7 @@ backend/app/   models (formato v2), passos (percorrer a árvore), validation (ve
                sandbox/executor.py (Docker), api.py, main.py
 executor/      Dockerfile + runner.py (roda DENTRO do contêiner)
 frontend/src/  components/ (Designer, PainelPasso, CampoDinamico, Verificador, PainelTeste, Historico…),
-               lib/modelo.ts (operações puras sobre o fluxo), lib/useHistorico.ts (desfazer/refazer), styles/theme.css
+               lib/modelo.ts (operações puras sobre o fluxo), hooks/useHistorico.ts (desfazer/refazer), styles/theme.css
 examples/      modelos de fluxo      scripts/      setup, start, build do executor
 ```
 
