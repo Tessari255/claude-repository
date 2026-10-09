@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { BlockType, Flow, Passo, PortTypes, Regra, Run } from '../types'
 import {
-  achar, atualizarPasso, campoDePartes, campoVazio, conteudoDinamicoPara, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, novoPasso,
-  partesDe, referenciaUnica, remover, renomearSaida, repeticoesDoLaco, tipoDaEntrada, todosOsPassos, usaOPasso, visiveisPara,
+  achar, atualizarPasso, blocoPythonDoPasso, campoDePartes, campoVazio, conteudoDinamicoPara, definicaoEfetiva, duplicar, fixarVersao, inserir, linhaDoPasso,
+  mover, novoPasso, partesDe, referenciaUnica, remover, renomearSaida, repeticoesDoLaco, rotuloDoDestino, tipoDaEntrada, todosOsPassos, usaOPasso, visiveisPara,
 } from './modelo'
 
 const def = (over: Partial<BlockType> & { id: string }): BlockType => ({
@@ -223,5 +223,71 @@ describe('histórico de execução com repetições', () => {
     expect(repeticoesDoLaco(run, externo, [])).toBe(2)
     expect(repeticoesDoLaco(run, interno, [0])).toBe(2)
     expect(repeticoesDoLaco(run, interno, [1])).toBe(0)
+  })
+})
+
+describe('operações do editor sobre o fluxo', () => {
+  const nomeDe = (id: string) => `nome(${id})`
+  const base = () => fluxo([p('a'), p('c', 'condicao', { slots: { sim: [p('s1')], nao: [] } }), p('z')])
+
+  it('fixarVersao sobe só o passo com o mesmo id e tipo, inclusive dentro de um ramo, sem mexer no original', () => {
+    const f = base()
+    const g = fixarVersao(f, { id: 's1', type: 'compor' }, 4)
+    expect(achar(g, 's1')?.passo.version).toBe(4)
+    expect(g.steps.map((x) => x.version)).toEqual([1, 1, 1])
+    expect(achar(f, 's1')?.passo.version).toBe(1)
+    expect(g.trigger).toBe(f.trigger)
+  })
+
+  it('fixarVersao não confunde outro passo do mesmo tipo nem o mesmo id com tipo diferente', () => {
+    const g = fixarVersao(base(), { id: 'a', type: 'compor' }, 2)
+    expect(g.steps.map((x) => x.version)).toEqual([2, 1, 1])
+    const h = fixarVersao(base(), { id: 'a', type: 'laco' }, 9)
+    expect(h.steps.map((x) => x.version)).toEqual([1, 1, 1])
+  })
+
+  it('rotuloDoDestino diz onde o passo vai entrar', () => {
+    const f = base()
+    expect(rotuloDoDestino(f, { paiId: null, espaco: null, indice: 0 }, nomeDe, defDe)).toBe('Logo depois do gatilho')
+    expect(rotuloDoDestino(f, { paiId: null, espaco: null, indice: 2 }, nomeDe, defDe)).toBe('Depois de “nome(c)”')
+    expect(rotuloDoDestino(f, { paiId: 'c', espaco: 'sim', indice: 0 }, nomeDe, defDe)).toBe('Dentro de “nome(c)” (Se sim)')
+    expect(rotuloDoDestino(f, { paiId: 'c', espaco: 'nao', indice: 0 }, nomeDe, defDe)).toBe('Dentro de “nome(c)” (Se não)')
+  })
+
+  it('rotuloDoDestino cai para o id do espaço quando a definição do contêiner não está disponível', () => {
+    expect(rotuloDoDestino(base(), { paiId: 'c', espaco: 'sim', indice: 0 }, nomeDe, () => undefined)).toBe('Dentro de “nome(c)” (sim)')
+    expect(rotuloDoDestino(base(), { paiId: 'c', espaco: null, indice: 0 }, nomeDe, defDe)).toBe('Dentro de “nome(c)”')
+  })
+
+  describe('blocoPythonDoPasso', () => {
+    const porta = (id: string) => ({ id, label: id, type: 'texto' as const, required: true, description: '' })
+    const python = def({
+      id: 'builtin.python', kind: 'python', name: 'Python', description: 'roda código',
+      params: [
+        { id: 'codigo', label: 'Código', type: 'codigo', required: true, default: 'def run(inputs, params):\n    return {}\n', options: [], help: '', placeholder: '',
+          multiline: true, allow_empty: false, min: null, max: null },
+        { id: 'entradas', label: 'Entradas', type: 'portas', required: false, default: [porta('padrao')], options: [], help: '', placeholder: '',
+          multiline: false, allow_empty: false, min: null, max: null },
+      ],
+      inputs_from: 'entradas',
+    })
+
+    it('leva o código, o nome e as portas atuais do passo para um modelo de bloco reutilizável', () => {
+      const passo = p('py', 'builtin.python', { label: 'Minha conta', params: { codigo: 'x = 1', entradas: [porta('a'), porta('b')] } })
+      const bloco = blocoPythonDoPasso(python, passo)!
+      expect(bloco).toMatchObject({ id: 'custom.novo', name: 'Minha conta', category: 'Personalizados', kind: 'python', description: '', code: 'x = 1', params: [] })
+      expect(bloco.inputs.map((i) => i.id)).toEqual(['a', 'b'])
+    })
+
+    it('sem rótulo nem código próprio usa o nome padrão e o código padrão do bloco', () => {
+      const bloco = blocoPythonDoPasso(python, p('py', 'builtin.python'))!
+      expect(bloco.name).toBe('Meu bloco Python')
+      expect(bloco.code).toBe('def run(inputs, params):\n    return {}\n')
+      expect(bloco.inputs.map((i) => i.id)).toEqual(['padrao'])
+    })
+
+    it('sem a definição do bloco não há modelo', () => {
+      expect(blocoPythonDoPasso(undefined, p('py'))).toBeUndefined()
+    })
   })
 })

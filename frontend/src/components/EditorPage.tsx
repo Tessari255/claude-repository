@@ -1,8 +1,8 @@
 import { useCallback, useMemo, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import {
-  achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
-  remover, usaOPasso, MAX_PROFUNDIDADE, type Destino,
+  achar, acharQualquer, blocoPythonDoPasso, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, fixarVersao, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso,
+  profundidadeDoDestino, remover, rotuloDoDestino, usaOPasso, MAX_PROFUNDIDADE, type Destino,
 } from '../lib/modelo'
 import { useAtalhos } from '../hooks/useAtalhos'
 import { useCatalogo } from '../hooks/useCatalogo'
@@ -137,7 +137,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     const ultima = ultimasVersoes.get(p.type)
     const nova = ultima ? catalogo.defs.get(chaveDoTipo(p.type, ultima)) : undefined
     if (!ultima || !nova) return
-    hist.definir((f) => ({ ...f, steps: JSON.parse(JSON.stringify(f.steps), (k, v) => (v && typeof v === 'object' && v.id === p.id && v.type === p.type ? { ...v, version: ultima } : v)) }))
+    hist.definir((f) => fixarVersao(f, p, ultima))
     notificar.info('Bloco atualizado', 'Confira o verificador de fluxo: se os campos mudaram, algum passo pode precisar de ajuste.')
   }
 
@@ -202,13 +202,6 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
       avisos[0] ?? 'Use-o em qualquer fluxo pelo seletor de passos. Fluxos que usam uma versão anterior continuam nela.')
   }
 
-  function blocoDoPasso(p: Passo): BlockType | undefined {
-    const d = defDe(p)
-    if (!d) return undefined
-    const ef = definicaoEfetiva(d, p.params)
-    return { ...d, id: 'custom.novo', name: p.label || 'Meu bloco Python', description: '', category: 'Personalizados', kind: 'python', code: String(p.params.codigo ?? d.params.find((x) => x.id === 'codigo')?.default ?? ''), inputs: ef.inputs, outputs: ef.outputs, params: [] }
-  }
-
   // -------------------------------------------------------------------------- telas de apoio
   if (falhaCarga) {
     return (
@@ -226,10 +219,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   const posSelecionado = selecionado && selecionado.id !== flow.trigger.id ? achar(flow, selecionado.id) : null
   const ctxSelecionado = selecionado ? contextoDoPasso(flow, selecionado.id, runVisivel, iteracoes) : []
   const linhaSelecionada = selecionado ? linhaDoPasso(runVisivel, selecionado.id, ctxSelecionado) : null
-  const nomeDestino = destino
-    ? (destino.paiId ? `Dentro de “${nomeDoId(destino.paiId)}”${destino.espaco ? ` (${defDe(acharQualquer(flow, destino.paiId)!)?.slots.find((s) => s.id === destino.espaco)?.label ?? destino.espaco})` : ''}`
-      : destino.indice === 0 ? 'Logo depois do gatilho' : `Depois de “${nomeDoId(flow.steps[destino.indice - 1].id)}”`)
-    : ''
+  const nomeDestino = destino ? rotuloDoDestino(flow, destino, nomeDoId, defDe) : ''
   const painelAtual: Painel = visao.atual && painel === 'passo' && !selecionado ? 'historico' : painel
 
   return (
@@ -311,7 +301,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
               somenteLeitura={somenteLeitura} indice={posSelecionado?.indice ?? 0} sistema={sistema}
               ultimaVersao={ultimasVersoes.get(selecionado.type) ?? null} aplicar={aplicar}
               onFechar={() => { setPainel(null); setSelecionadoId(null) }}
-              onSalvarComoBloco={(p) => setDialogo({ tipo: 'bloco', modelo: blocoDoPasso(p) })}
+              onSalvarComoBloco={(p) => setDialogo({ tipo: 'bloco', modelo: blocoPythonDoPasso(defDe(p), p) })}
               onAtualizarVersao={atualizarVersao}
               onEditarBloco={(p) => { const d = defDe(p); if (d) setDialogo({ tipo: 'bloco', editar: d, baseVersao: d.version }) }}
             />

@@ -138,6 +138,16 @@ export function novoPasso(def: BlockType): Passo {
   return passo
 }
 
+/** Modelo de um bloco Python reutilizável a partir de um passo Python já configurado (código, entradas e saídas atuais). */
+export function blocoPythonDoPasso(def: BlockType | undefined, p: Passo): BlockType | undefined {
+  if (!def) return undefined
+  const ef = definicaoEfetiva(def, p.params)
+  return {
+    ...def, id: 'custom.novo', name: p.label || 'Meu bloco Python', description: '', category: 'Personalizados', kind: 'python',
+    code: String(p.params.codigo ?? def.params.find((x) => x.id === 'codigo')?.default ?? ''), inputs: ef.inputs, outputs: ef.outputs, params: [],
+  }
+}
+
 export function fluxoVazio(gatilho?: BlockType): Flow {
   const params: Record<string, unknown> = {}
   for (const p of gatilho?.params ?? []) if (p.default !== null && p.default !== undefined) params[p.id] = clonar(p.default)
@@ -196,7 +206,25 @@ export function atualizarPasso(flow: Flow, id: string, fn: (p: Passo) => Passo):
   return { ...flow, steps: alvo(flow.steps) }
 }
 
+/** Sobe para `versao` os passos (no corpo do fluxo, não o gatilho) com o mesmo id e tipo de `alvo`; o fluxo original não muda. */
+export function fixarVersao(flow: Flow, alvo: Pick<Passo, 'id' | 'type'>, versao: number): Flow {
+  return {
+    ...flow,
+    steps: JSON.parse(JSON.stringify(flow.steps), (_k, v) => (v && typeof v === 'object' && v.id === alvo.id && v.type === alvo.type ? { ...v, version: versao } : v)),
+  }
+}
+
 export interface Destino { paiId: string | null; espaco: string | null; indice: number }
+
+/** Onde o novo passo vai entrar, em palavras, para o seletor de blocos. */
+export function rotuloDoDestino(flow: Flow, d: Destino, nomeDe: (id: string) => string, def: ObterDef): string {
+  if (d.paiId) {
+    const pai = acharQualquer(flow, d.paiId)
+    const espaco = d.espaco ? ` (${(pai && def(pai)?.slots.find((s) => s.id === d.espaco)?.label) ?? d.espaco})` : ''
+    return `Dentro de “${nomeDe(d.paiId)}”${espaco}`
+  }
+  return d.indice === 0 ? 'Logo depois do gatilho' : `Depois de “${nomeDe(flow.steps[d.indice - 1].id)}”`
+}
 
 /** Profundidade (1 = lista principal) da lista de destino. */
 export function profundidadeDoDestino(flow: Flow, d: Destino): number {
