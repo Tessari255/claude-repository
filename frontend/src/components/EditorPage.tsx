@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import {
   achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
-  remover, todosOsPassos, usaOPasso, MAX_PROFUNDIDADE, type Destino,
+  remover, usaOPasso, MAX_PROFUNDIDADE, type Destino,
 } from '../lib/modelo'
 import { useAtalhos } from '../hooks/useAtalhos'
+import { useCatalogo } from '../hooks/useCatalogo'
 import { useHistorico } from '../hooks/useHistorico'
+import { useVivo } from '../hooks/useVivo'
+import { montarDefs } from '../lib/catalogo'
 import { slugDeId } from '../lib/visual'
-import type { BlockType, Flow, Issue, Passo, PortTypes, Project, Run, SystemInfo } from '../types'
+import type { BlockType, Flow, Issue, Passo, PortTypes, Project, Run } from '../types'
 import { BlockEditorDialog } from './BlockEditorDialog'
 import { Designer, type AcaoDoPasso } from './Designer'
 import { AtalhosDialog } from './Dialogs'
@@ -47,9 +50,8 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   const [nome, setNome] = useState('')
   const hist = useHistorico<Flow>()
   const flowAtual = hist.atual
-  const [defs, setDefs] = useState<Map<string, BlockType>>(new Map())
-  const [biblioteca, setBiblioteca] = useState<BlockType[]>([])
-  const [sistema, setSistema] = useState<SystemInfo | null>(null)
+  const catalogo = useCatalogo()
+  const { biblioteca, sistema, defDe, ultimasVersoes } = catalogo
   const [analise, setAnalise] = useState<{ issues: Issue[]; port_types: PortTypes }>({ issues: [], port_types: {} })
   const [verificando, setVerificando] = useState(false)
   const [salvoJson, setSalvoJson] = useState<string | null>(null)
@@ -65,30 +67,14 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   const [dialogo, setDialogo] = useState<Dialogo>(null)
   const [iniciarTeste, setIniciarTeste] = useState(false)
 
-  const vivo = useRef(true)
+  const vivo = useVivo()
   const contadorValidacao = useRef(0)
   const estado = useRef({ flow: flowAtual, nome, projeto })
   estado.current = { flow: flowAtual, nome, projeto }
-  useEffect(() => () => { vivo.current = false }, [])
 
   const flow = visao?.flow ?? flowAtual
   const somenteLeitura = !!visao
   const runVisivel = visao ? visao.run : run
-
-  // -------------------------------------------------------------------------- definições dos blocos
-  const defDe = useCallback((p: Passo) => defs.get(chaveDoTipo(p.type, p.version)), [defs])
-
-  const garantirDefs = useCallback(async (f: Flow) => {
-    const faltando = todosOsPassos(f).filter((p) => !defs.has(chaveDoTipo(p.type, p.version)))
-    if (faltando.length === 0) return
-    const achadas = new Map<string, BlockType>()
-    for (const p of faltando) {
-      const k = chaveDoTipo(p.type, p.version)
-      if (achadas.has(k)) continue
-      try { achadas.set(k, await api.versaoDoBloco(p.type, p.version)) } catch { /* bloco indisponível: o cartão avisa */ }
-    }
-    if (achadas.size && vivo.current) setDefs((m) => { const n = new Map(m); achadas.forEach((v, k) => n.set(k, v)); return n })
-  }, [defs])
 
   // -------------------------------------------------------------------------- carga inicial
   useEffect(() => {
@@ -96,16 +82,10 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     ;(async () => {
       try {
         const [p, blocos, sis] = await Promise.all([api.projeto(projectId), api.blocos(), api.sistema()])
-        const mapa = new Map<string, BlockType>(blocos.map((b) => [chaveDoTipo(b.id, b.version), b]))
-        for (const passo of todosOsPassos(p.flow)) {
-          const k = chaveDoTipo(passo.type, passo.version)
-          if (!mapa.has(k)) {
-            try { mapa.set(k, await api.versaoDoBloco(passo.type, passo.version)) } catch { /* bloco indisponível: o cartão avisa */ }
-          }
-        }
+        const defs = await montarDefs(blocos, p.flow, api.versaoDoBloco)
         if (cancelado) return
         setProjeto(p); setNome(p.name)
-        setDefs(mapa); setBiblioteca(blocos); setSistema(sis)
+        catalogo.iniciar({ defs, biblioteca: blocos, sistema: sis })
         hist.reiniciar(p.flow)
         setSalvoJson(JSON.stringify(p.flow))
         api.historico(p.id).then((h) => !cancelado && setHistoricoRuns(h)).catch(() => undefined)
@@ -139,19 +119,13 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     } catch { /* sem conexão: mantém a última análise */ } finally {
       if (vivo.current && minha === contadorValidacao.current) setVerificando(false)
     }
-  }, [])
+  }, [vivo])
 
   useEffect(() => {
     if (salvoJson === null || visao) return
     const t = window.setTimeout(revalidar, 350)
     return () => window.clearTimeout(t)
   }, [fluxoJson, salvoJson, revalidar, sistema?.executor.disponivel, visao])
-
-  const ultimasVersoes = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const b of biblioteca) m.set(b.id, Math.max(m.get(b.id) ?? 0, b.version))
-    return m
-  }, [biblioteca])
 
   const erros = useMemo(() => analise.issues.filter((i) => i.severity === 'erro'), [analise.issues])
   const executorOk = sistema?.executor.disponivel ?? false
@@ -179,7 +153,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
     if (!destino) return
     const novo = novoPasso(def)
     hist.definir((f) => inserir(f, destino, novo))
-    setDefs((m) => (m.has(chaveDoTipo(def.id, def.version)) ? m : new Map(m).set(chaveDoTipo(def.id, def.version), def)))
+    catalogo.registrar(def)
     setSelecionadoId(novo.id)
     setPainel('passo')
     setDestino(null)
@@ -223,7 +197,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
 
   function atualizarVersao(p: Passo) {
     const ultima = ultimasVersoes.get(p.type)
-    const nova = ultima ? defs.get(chaveDoTipo(p.type, ultima)) : undefined
+    const nova = ultima ? catalogo.defs.get(chaveDoTipo(p.type, ultima)) : undefined
     if (!ultima || !nova) return
     hist.definir((f) => ({ ...f, steps: JSON.parse(JSON.stringify(f.steps), (k, v) => (v && typeof v === 'object' && v.id === p.id && v.type === p.type ? { ...v, version: ultima } : v)) }))
     notificar.info('Bloco atualizado', 'Confira o verificador de fluxo: se os campos mudaram, algum passo pode precisar de ajuste.')
@@ -294,7 +268,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
         api.historico(projectId).then((h) => vivo.current && setHistoricoRuns(h)).catch(() => undefined)
       }
     }
-  }, [notificar, projectId])
+  }, [notificar, projectId, vivo])
 
   const testar = useCallback(async (dados?: Record<string, unknown>) => {
     const { flow: f, projeto: p } = estado.current
@@ -334,7 +308,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
   async function abrirExecucao(r: Run) {
     try {
       const completa = await api.execucaoComFluxo(r.id)
-      await garantirDefs(completa.flow)
+      await catalogo.garantirDefs(completa.flow)
       setVisao({ run: completa, flow: completa.flow })
       setIteracoes({})
       setSelecionadoId(null)
@@ -362,16 +336,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
 
   // -------------------------------------------------------------------------- blocos Python reutilizáveis
   async function aposSalvarBloco(b: BlockType, avisos: string[]) {
-    try {
-      const lista = await api.blocos()
-      setBiblioteca(lista)
-      setDefs((m) => {
-        const n = new Map(m)
-        for (const x of lista) n.set(chaveDoTipo(x.id, x.version), x)
-        n.set(chaveDoTipo(b.id, b.version), b)
-        return n
-      })
-    } catch { /* a biblioteca se atualiza na próxima carga */ }
+    await catalogo.aposSalvarBloco(b)
     notificar.sucesso(`Bloco “${b.name}” salvo na biblioteca (v${b.version})`,
       avisos[0] ?? 'Use-o em qualquer fluxo pelo seletor de passos. Fluxos que usam uma versão anterior continuam nela.')
   }
