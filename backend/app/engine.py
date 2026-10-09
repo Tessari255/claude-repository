@@ -23,7 +23,7 @@ from .blocks.builtin import (
     ContextoBloco,
 )
 from .config import Limites
-from .dinamico import avaliar_regras, montar_entradas
+from .controle import Controle
 from .errors import ApiError, ErroBloco
 from .execucao import (
     MAX_REGISTROS,
@@ -31,7 +31,6 @@ from .execucao import (
     Encerrado,
     Execucao,
     Resultado,
-    ResultadoLista,
     falha_de,
 )
 from .historico import Historico
@@ -54,8 +53,6 @@ from .validation import (
 
 log = logging.getLogger("trama.motor")
 
-ESTADOS_ROTULO = {"concluido": "teve sucesso", "falhou": "falhou", "ignorado": "foi ignorado", "expirou": "expirou"}
-
 
 class Motor:
     def __init__(self, store: Store, executor: DockerExecutor, registro: Registro, limites: Limites,
@@ -68,6 +65,7 @@ class Motor:
         self.registro = registro
         self.limites = limites
         self.simples = PassosSimples(self.historico, executor, limites)
+        self.controle = Controle(self.historico, limites, self._passo)
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="trama-exec")
         self._cancelamentos: dict[str, threading.Event] = {}
         self._trava = threading.Lock()
@@ -172,10 +170,10 @@ class Motor:
             r = self._passo(ex, flow.trigger, ())
             falhas = list(r.falhas)
             if r.estado != "falhou":
-                falhas = self._lista(ex, flow.steps, ()).falhas
+                falhas = self.controle.lista(ex, flow.steps, ()).falhas
             else:
                 for p in flow.steps:
-                    self._ignorar(ex, p, (), "O gatilho falhou, então o fluxo não seguiu.")
+                    self.controle.ignorar(ex, p, (), "O gatilho falhou, então o fluxo não seguiu.")
             if falhas:
                 estado, erro = "falhou", falhas[0]
         except Encerrado as e:
@@ -197,60 +195,6 @@ class Motor:
             run_id, state=estado, finished_at=agora(), duration_ms=int((time.monotonic() - inicio) * 1000),
             result=resultado, error=erro)
 
-    # ----------------------------------------------------------- listas e passos
-    def _lista(self, ex: Execucao, passos: list[Passo], iteracao: tuple[int, ...]) -> ResultadoLista:
-        """Executa uma lista de passos em sequência. Devolve as falhas não tratadas e o resumo de cada passo."""
-        anterior: Resultado | None = None
-        anterior_nome = ""
-        pendentes: list[dict[str, Any]] = []
-        da_anterior: list[dict[str, Any]] = []
-        resumo: list[dict[str, Any]] = []
-        for p in passos:
-            ex.checar_cancelamento()
-            nome = ex.nomes.get(p.id, p.id)
-            if anterior is not None:
-                ok, situacao = self._deve_rodar(p, anterior)
-                if not ok:
-                    quando = " ou ".join({"sucesso": "tiver sucesso", "falhou": "falhar", "ignorado": "for ignorado",
-                                          "expirou": "expirar"}[c] for c in p.run_after)
-                    motivo = (f"Não executado: o passo anterior, “{anterior_nome}”, {ESTADOS_ROTULO[situacao]}, "
-                              f"e este passo só roda se ele {quando}.")
-                    self._ignorar(ex, p, iteracao, motivo)
-                    anterior, anterior_nome, da_anterior = Resultado("ignorado"), nome, []
-                    resumo.append({"passo": nome, "estado": "ignorado", "erro": None})
-                    continue
-                if anterior.estado == "falhou":  # este passo trata a falha do anterior
-                    for f in da_anterior:
-                        if f in pendentes:
-                            pendentes.remove(f)
-            r = self._passo(ex, p, iteracao)
-            if r.estado == "falhou":
-                pendentes.extend(r.falhas)
-            anterior, anterior_nome, da_anterior = r, nome, list(r.falhas) if r.estado == "falhou" else []
-            resumo.append({"passo": nome, "estado": r.estado, "erro": r.mensagem or None})
-        return ResultadoLista(pendentes, resumo)
-
-    @staticmethod
-    def _deve_rodar(p: Passo, anterior: Resultado) -> tuple[bool, str]:
-        situacao = "expirou" if anterior.estado == "falhou" and anterior.expirou else anterior.estado
-        permitido = {"sucesso": "concluido", "ignorado": "ignorado"}
-        for cond in p.run_after:
-            if cond == "falhou" and anterior.estado == "falhou" and not anterior.expirou:
-                return True, situacao
-            if cond == "expirou" and anterior.estado == "falhou" and anterior.expirou:
-                return True, situacao
-            if cond in permitido and anterior.estado == permitido[cond]:
-                return True, situacao
-        return False, situacao
-
-    def _ignorar(self, ex: Execucao, passo: Passo, iteracao: tuple[int, ...], motivo: str) -> None:
-        """Marca o passo e tudo o que há dentro dele como ignorado."""
-        self.historico.gravar_etapa(ex, passo.id, iteracao, state="ignorado", skip_reason=motivo)
-        nome = ex.nomes.get(passo.id, passo.id)
-        for filhos in passo.slots.values():
-            for f in filhos:
-                self._ignorar(ex, f, iteracao, f"O bloco “{nome}” não foi executado.")
-
     # ------------------------------------------------------------------ um passo
     def _tipo(self, ex: Execucao, passo: Passo) -> BlockType:
         return ex.defs[f"{passo.type}@{passo.version}"]
@@ -263,7 +207,7 @@ class Motor:
         self.historico.gravar_etapa(ex, passo.id, iteracao, state="executando", started_at=agora())
         try:
             if tipo.slots:
-                saidas, falhas, extra_logs = self._conteiner(ex, passo, tipo, iteracao, ctx)
+                saidas, falhas, extra_logs = self.controle.conteiner(ex, passo, tipo, iteracao)
                 ctx.logs.extend(extra_logs)
                 dur = int((time.monotonic() - t0) * 1000)
                 if falhas:
@@ -297,77 +241,6 @@ class Motor:
             self.historico.gravar_etapa(ex, passo.id, iteracao, state="falhou", finished_at=agora(),
                                         duration_ms=int((time.monotonic() - t0) * 1000), logs=ctx.logs, error=erro.como_dict())
             return Resultado("falhou", False, [falha_de(passo.id, nome, erro)], erro.mensagem)
-
-    # ------------------------------------------------------------------ contêineres
-    def _conteiner(self, ex: Execucao, passo: Passo, tipo: BlockType, iteracao: tuple[int, ...],
-                   ctx: ContextoBloco) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
-        """Executa condição, para cada, repetir até ou escopo. Devolve (saídas, falhas não tratadas, logs)."""
-        logs: list[dict[str, str]] = []
-        nome = ex.nomes.get(passo.id, passo.id)
-        params = parametros_efetivos(tipo, passo.params)
-        entradas = montar_entradas(ex, passo, tipo, self.limites)
-        self.historico.gravar_etapa(ex, passo.id, iteracao, inputs=entradas)
-
-        if tipo.id == "builtin.condicao":
-            r = avaliar_regras(ex, params, self.limites)
-            logs.append({"source": "system", "text": f"Teste concluído: {'sim' if r else 'não'}. Seguindo por “{'Se sim' if r else 'Se não'}”."})
-            escolhido, outro = ("sim", "nao") if r else ("nao", "sim")
-            for f in passo.slots.get(outro, []):
-                self._ignorar(ex, f, iteracao, f"O caminho “{'Se sim' if outro == 'sim' else 'Se não'}” da condição “{nome}” não foi escolhido.")
-            ex.valores[passo.id] = {"resultado": r}
-            res = self._lista(ex, passo.slots.get(escolhido, []), iteracao)
-            return {"resultado": r}, res.falhas, logs
-
-        if tipo.id == "builtin.escopo":
-            ex.valores[passo.id] = {}
-            res = self._lista(ex, passo.slots.get("corpo", []), iteracao)
-            saidas = {"falhou": bool(res.falhas), "erro": res.falhas[0]["message"] if res.falhas else "",
-                      "resultados": res.resumo}
-            ex.valores[passo.id] = saidas
-            return saidas, res.falhas, logs
-
-        corpo = passo.slots.get("corpo", [])
-        if tipo.id == "builtin.para_cada":
-            lista = entradas["lista"]
-            limite = int(params.get("limite", 100))
-            if limite > self.limites.itens_max_lista:
-                raise ErroBloco(f"O limite de itens ({limite}) passa do máximo permitido ({self.limites.itens_max_lista}).",
-                                codigo="parametro_invalido")
-            if len(lista) > limite:
-                raise ErroBloco(f"A lista tem {len(lista)} itens, mas o limite configurado é {limite}.", codigo="limite_itens",
-                                sugestao=f"Aumente o “Limite de itens” no bloco (até {self.limites.itens_max_lista}) ou envie uma lista menor.")
-            if not lista:
-                logs.append({"source": "system", "text": "A lista está vazia: nenhum item foi percorrido."})
-                for f in corpo:
-                    self._ignorar(ex, f, iteracao, f"A lista de “{nome}” está vazia.")
-            falhas: list[dict[str, Any]] = []
-            for i, item in enumerate(lista):
-                ex.checar_cancelamento()
-                ex.valores[passo.id] = {"item": item, "indice": i}
-                falhas = self._lista(ex, corpo, (*iteracao, i)).falhas
-                if falhas:
-                    logs.append({"source": "system", "text": f"O item {i + 1} de {len(lista)} falhou; as repetições seguintes foram canceladas."})
-                    break
-            saidas = {"quantidade": len(lista)}
-            ex.valores[passo.id] = saidas
-            return saidas, falhas, logs
-
-        # repetir até
-        limite = int(params.get("limite", 10))
-        repeticoes, falhas = 0, []
-        while True:
-            ex.checar_cancelamento()
-            ex.valores[passo.id] = {"indice": repeticoes}
-            falhas = self._lista(ex, corpo, (*iteracao, repeticoes)).falhas
-            repeticoes += 1
-            if falhas or avaliar_regras(ex, params, self.limites):
-                break
-            if repeticoes >= limite:
-                raise ErroBloco(f"A condição não ficou verdadeira em {limite} repetições.", codigo="limite_repeticoes",
-                                sugestao="Confira a condição ou aumente o “Limite de repetições” (até 100).")
-        saidas = {"repeticoes": repeticoes}
-        ex.valores[passo.id] = saidas
-        return saidas, falhas, logs
 
     # --------------------------------------------------------------- teste isolado
     def testar_bloco(self, tipo: BlockType, params: dict[str, Any], entradas: dict[str, Any],

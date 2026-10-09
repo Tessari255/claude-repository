@@ -15,21 +15,22 @@ import pytest
 
 from app.blocks.builtin import ContextoBloco
 from app.config import Limites
+from app.controle import Controle, deve_rodar, motivo_ignorado
 from app.dinamico import avaliar_regras, montar_entradas, resolver_campo, valor_da_ref
 from app.errors import ErroBloco
 from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
-from app.execucao import MAX_REGISTROS, Cancelado, Execucao, chave_etapa, falha_de
+from app.execucao import MAX_REGISTROS, Cancelado, Execucao, Resultado, chave_etapa, falha_de
 from app.historico import Historico
 from app.models import Campo, Flow, Passo, Ref
 from app.passos_simples import PassosSimples
 from app.sandbox import ExecutorStatus, SandboxResult
 
-from .helpers import campo, compor, fluxo, lit, passo, python_inline, ref, saida, tpl
+from .helpers import campo, compor, condicao, fluxo, lit, passo, python_inline, ref, saida, tpl
 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -344,3 +345,149 @@ def test_tempo_do_passo_so_pode_diminuir_o_limite_do_executor(sem_docker, timeou
     executor = ExecutorFalso()
     _rodar_python(sem_docker, executor, Limites(tempo_s=5.0), timeout=timeout_do_passo)
     assert executor.chamadas[0]["limits"].tempo_s == esperado
+
+
+# ------------------------------------------------------------------ controle de fluxo (passos simulados)
+def _passo_simples(id, run_after=None):
+    return Passo.model_validate(passo(id, "builtin.compor", {"entrada": lit(1)}, run_after=run_after))
+
+
+@pytest.mark.parametrize("run_after,anterior,roda,situacao", [
+    (["sucesso"], Resultado("concluido"), True, "concluido"),
+    (["sucesso"], Resultado("falhou"), False, "falhou"),
+    (["sucesso"], Resultado("ignorado"), False, "ignorado"),
+    (["falhou"], Resultado("falhou"), True, "falhou"),
+    (["falhou"], Resultado("falhou", expirou=True), False, "expirou"),
+    (["expirou"], Resultado("falhou", expirou=True), True, "expirou"),
+    (["expirou"], Resultado("falhou"), False, "falhou"),
+    (["ignorado"], Resultado("ignorado"), True, "ignorado"),
+    (["sucesso", "falhou"], Resultado("falhou"), True, "falhou"),
+    (["falhou", "expirou"], Resultado("concluido"), False, "concluido"),
+])
+def test_executar_apos_decide_pelo_que_aconteceu_com_o_passo_anterior(run_after, anterior, roda, situacao):
+    assert deve_rodar(_passo_simples("p", run_after), anterior) == (roda, situacao)
+
+
+def test_motivo_de_um_passo_ignorado_diz_o_que_aconteceu_e_o_que_ele_esperava():
+    assert motivo_ignorado(_passo_simples("p"), "Buscar", "falhou") == (
+        "Não executado: o passo anterior, “Buscar”, falhou, e este passo só roda se ele tiver sucesso.")
+    assert motivo_ignorado(_passo_simples("p", ["falhou", "expirou"]), "Buscar", "concluido") == (
+        "Não executado: o passo anterior, “Buscar”, teve sucesso, e este passo só roda se ele falhar ou expirar.")
+
+
+def _controle(sem_docker, comportamento, etapas, limites=None):
+    """Controle cujos passos são simulados: ``comportamento(ex, passo, iteracao)`` devolve o Resultado de cada um."""
+    historico, ex = _execucao_com_linha(sem_docker.store, etapas)
+    ex.nomes = {e: f"Passo {e.upper()}" for e in etapas}
+    visto: list[tuple[str, tuple[int, ...]]] = []
+
+    def executar(ex_, p, iteracao):
+        visto.append((p.id, iteracao))
+        return comportamento(ex_, p, iteracao)
+    return Controle(historico, limites or Limites(), executar), ex, visto
+
+
+def _falhou(passo_id="b", mensagem="deu ruim"):
+    falha = {"step_id": passo_id, "step_name": f"Passo {passo_id.upper()}", "message": mensagem}
+    return Resultado("falhou", False, [falha], mensagem)
+
+
+def _linhas(sem_docker, ex):
+    return {(s["step_id"], tuple(s["iteration"])): s for s in sem_docker.store.obter_execucao(ex.run_id)["steps"]}
+
+
+def test_falha_sem_tratamento_ignora_o_proximo_passo_e_sobe_para_o_nivel_de_cima(sem_docker):
+    controle, ex, visto = _controle(sem_docker, lambda ex_, p, it: _falhou() if p.id == "b" else Resultado("concluido"), ("a", "b", "c"))
+    res = controle.lista(ex, [_passo_simples("a"), _passo_simples("b"), _passo_simples("c")], ())
+    assert visto == [("a", ()), ("b", ())]
+    assert res.falhas == _falhou().falhas
+    assert res.resumo == [{"passo": "Passo A", "estado": "concluido", "erro": None},
+                          {"passo": "Passo B", "estado": "falhou", "erro": "deu ruim"},
+                          {"passo": "Passo C", "estado": "ignorado", "erro": None}]
+    c = _linhas(sem_docker, ex)[("c", ())]
+    assert c["state"] == "ignorado" and c["skip_reason"].endswith("falhou, e este passo só roda se ele tiver sucesso.")
+
+
+def test_passo_que_roda_apos_a_falha_trata_o_erro_e_a_lista_termina_sem_falhas(sem_docker):
+    controle, ex, visto = _controle(sem_docker, lambda ex_, p, it: _falhou() if p.id == "b" else Resultado("concluido"), ("a", "b", "c"))
+    res = controle.lista(ex, [_passo_simples("a"), _passo_simples("b"), _passo_simples("c", ["falhou"])], ())
+    assert visto == [("a", ()), ("b", ()), ("c", ())] and res.falhas == []
+
+
+def test_ignorar_marca_tambem_os_passos_de_dentro_do_bloco(sem_docker):
+    controle, ex, _ = _controle(sem_docker, lambda ex_, p, it: Resultado("concluido"), ("escopo",))
+    escopo = Passo.model_validate(passo("escopo", "builtin.escopo", slots={"corpo": [compor("dentro", lit(1))]}))
+    controle.ignorar(ex, escopo, (), "motivo qualquer")
+    linhas = _linhas(sem_docker, ex)
+    assert linhas[("escopo", ())]["skip_reason"] == "motivo qualquer"
+    assert linhas[("dentro", ())]["state"] == "ignorado" and linhas[("dentro", ())]["skip_reason"] == "O bloco “Passo ESCOPO” não foi executado."
+
+
+def test_condicao_roda_so_o_caminho_escolhido_e_ignora_o_outro(sem_docker):
+    controle, ex, visto = _controle(sem_docker, lambda ex_, p, it: Resultado("concluido"), ("c", "s", "n"))
+    cond = Passo.model_validate(condicao("c", lit(1), "igual", "1", sim=[compor("s", lit(1))], nao=[compor("n", lit(2))]))
+    saidas, falhas, logs = controle.conteiner(ex, cond, sem_docker.registro.resolver("builtin.condicao", 1), ())
+    assert (saidas, falhas) == ({"resultado": True}, []) and visto == [("s", ())]
+    assert logs == [{"source": "system", "text": "Teste concluído: sim. Seguindo por “Se sim”."}]
+    n = _linhas(sem_docker, ex)[("n", ())]
+    assert n["state"] == "ignorado" and n["skip_reason"] == "O caminho “Se não” da condição “Passo C” não foi escolhido."
+
+
+def test_para_cada_entrega_item_e_indice_e_para_na_primeira_falha(sem_docker):
+    vistos: list[dict] = []
+
+    def comportamento(ex_, p, it):
+        vistos.append(dict(ex_.valores["laco"]))
+        return _falhou("x") if it == (1,) else Resultado("concluido")
+    controle, ex, visto = _controle(sem_docker, comportamento, ("laco",))
+    laco = Passo.model_validate(passo("laco", "builtin.para_cada", {"lista": lit([10, 20, 30])}, {"limite": 5},
+                                      slots={"corpo": [compor("x", lit(1))]}))
+    saidas, falhas, logs = controle.conteiner(ex, laco, sem_docker.registro.resolver("builtin.para_cada", 1), ())
+    assert visto == [("x", (0,)), ("x", (1,))]
+    assert vistos == [{"item": 10, "indice": 0}, {"item": 20, "indice": 1}]
+    assert saidas == {"quantidade": 3} and falhas == _falhou("x").falhas
+    assert logs == [{"source": "system", "text": "O item 2 de 3 falhou; as repetições seguintes foram canceladas."}]
+
+
+def test_para_cada_recusa_lista_acima_do_limite_sem_cortar_em_silencio(sem_docker):
+    controle, ex, visto = _controle(sem_docker, lambda ex_, p, it: Resultado("concluido"), ("laco",))
+    laco = Passo.model_validate(passo("laco", "builtin.para_cada", {"lista": lit([1, 2, 3])}, {"limite": 2},
+                                      slots={"corpo": [compor("x", lit(1))]}))
+    with pytest.raises(ErroBloco) as exc:
+        controle.conteiner(ex, laco, sem_docker.registro.resolver("builtin.para_cada", 1), ())
+    assert exc.value.codigo == "limite_itens" and visto == []
+
+
+def _repetir_ate(limite):
+    regra = {"esq": ref("v", "n"), "op": "maior_igual", "dir": lit(3)}
+    return Passo.model_validate(passo("rep", "builtin.repetir_ate", params={"limite": limite, "combinador": "e", "regras": [regra]},
+                                      slots={"corpo": [compor("x", lit(1))]}))
+
+
+def _contar(ex_, p, it):
+    ex_.valores["v"] = {"n": it[-1] + 1}
+    return Resultado("concluido")
+
+
+def test_repetir_ate_para_quando_a_condicao_fica_verdadeira(sem_docker):
+    controle, ex, visto = _controle(sem_docker, _contar, ("rep",))
+    saidas, falhas, _ = controle.conteiner(ex, _repetir_ate(5), sem_docker.registro.resolver("builtin.repetir_ate", 1), ())
+    assert saidas == {"repeticoes": 3} and falhas == [] and visto == [("x", (0,)), ("x", (1,)), ("x", (2,))]
+
+
+def test_repetir_ate_falha_quando_estoura_o_limite_de_repeticoes(sem_docker):
+    controle, ex, visto = _controle(sem_docker, _contar, ("rep",))
+    with pytest.raises(ErroBloco) as exc:
+        controle.conteiner(ex, _repetir_ate(2), sem_docker.registro.resolver("builtin.repetir_ate", 1), ())
+    assert exc.value.codigo == "limite_repeticoes" and len(visto) == 2
+
+
+def test_escopo_resume_o_resultado_de_cada_passo_e_devolve_a_falha_ao_nivel_de_cima(sem_docker):
+    controle, ex, _ = _controle(sem_docker, lambda ex_, p, it: _falhou("b") if p.id == "b" else Resultado("concluido"), ("tentar",))
+    tentar = Passo.model_validate(passo("tentar", "builtin.escopo", slots={"corpo": [compor("a", lit(1)), compor("b", lit(1))]}))
+    ex.nomes.update({"a": "Passo A", "b": "Passo B"})
+    saidas, falhas, _ = controle.conteiner(ex, tentar, sem_docker.registro.resolver("builtin.escopo", 1), ())
+    assert saidas == {"falhou": True, "erro": "deu ruim", "resultados": [
+        {"passo": "Passo A", "estado": "concluido", "erro": None}, {"passo": "Passo B", "estado": "falhou", "erro": "deu ruim"}]}
+    assert falhas == _falhou("b").falhas
+    assert ex.valores["tentar"] == saidas  # o passo seguinte lê o resumo como conteúdo dinâmico
