@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { adicionarNoFim, cartao, criarFluxo, escolherBloco, inserirConteudoDinamico, substituirCodigo, testar } from './ajudas'
+import { adicionarNoFim, cartao, criarFluxo, escolherBloco, inserirConteudoDinamico, semViolacoesDeAcessibilidade, substituirCodigo, testar } from './ajudas'
 
 test('passo de código Python no fluxo: erro com a linha, correção, resultado e salvar como bloco reutilizável', async ({ page }) => {
   await criarFluxo(page, 'Python no fluxo')
@@ -168,4 +168,49 @@ test('tentar e capturar: o passo configurado para rodar após a falha trata o er
   await expect(page.locator('.cartao-passo.estado-falhou')).toHaveCount(2) // o passo Python e o escopo
   await expect(cartao(page, 'Compor')).toContainText('Concluído')
   await expect(resultado).toContainText('Concluído')                       // falha tratada: execução concluída
+})
+
+test('Para cada com um passo Python dentro: o painel explica o lote e o laço mostra uma repetição por item', async ({ page }) => {
+  await criarFluxo(page, 'Laço com Python')
+  const painel = page.getByRole('complementary', { name: /^Configuração de/ })
+  await cartao(page, 'Acionar manualmente').locator('.cartao-principal').click()
+  await painel.getByRole('button', { name: 'Adicionar campo' }).click()
+  const campo = painel.getByRole('group', { name: 'Campo 1' })
+  await campo.getByLabel('Rótulo').fill('Números')
+  await campo.getByLabel('Tipo').selectOption('lista')
+  await campo.getByLabel('Usar um valor padrão').check()
+  await campo.getByLabel('Valor padrão de Números').fill('[3, 5, 7, 9]')
+
+  const laco = await adicionarNoFim(page, 'Para cada')
+  await expect(painel.getByText('Python dentro do laço')).toBeVisible()
+  await expect(painel).toContainText('só um passo de código Python')
+  await semViolacoesDeAcessibilidade(page, '.painel-passo')
+  await inserirConteudoDinamico(page, laco, 'Lista', 'Números')
+
+  await page.getByRole('button', { name: /Adicionar um passo em “Para cada item/ }).click()
+  await escolherBloco(page, 'Executar código Python')
+  await painel.getByRole('textbox', { name: 'Nome do passo' }).fill('Dobrar')
+  await substituirCodigo(page, 'def run(inputs, params):\n    print("dobrando", inputs["n"])\n    return {"resultado": f"dobro de {inputs[\'n\']}: {inputs[\'n\'] * 2}"}\n', painel)
+  await painel.getByText('Declarar entradas e saídas').click()
+  const entrada = painel.getByRole('group', { name: 'Entrada 1' })
+  await entrada.getByLabel('Rótulo').fill('n')
+  await entrada.getByLabel('Tipo').selectOption('numero')
+  const dobrar = cartao(page, 'Dobrar')
+  await inserirConteudoDinamico(page, dobrar, 'n', 'Item atual')
+
+  const saida = await adicionarNoFim(page, 'Saída final')
+  await inserirConteudoDinamico(page, saida, 'Valor', 'Quantidade de itens')
+  const resultado = await testar(page)
+  await expect(resultado).toContainText('Concluído')
+  await expect(resultado.locator('.saida-final')).toContainText('4')
+
+  // uma repetição por item, cada uma com as entradas, as saídas e os logs dela
+  await expect(page.getByRole('group', { name: /^Repetições de/ })).toContainText('Repetição 1 de 4')
+  for (let i = 0; i < 3; i++) await page.getByRole('button', { name: 'Próxima repetição' }).click()
+  await expect(page.getByRole('group', { name: /^Repetições de/ })).toContainText('Repetição 4 de 4')
+  await dobrar.locator('.cartao-principal').click()
+  await page.getByRole('tab', { name: 'Execução' }).click()
+  const execucao = page.getByRole('tabpanel')
+  await expect(execucao).toContainText('dobro de 9: 18')
+  await expect(execucao).toContainText('dobrando 9')
 })

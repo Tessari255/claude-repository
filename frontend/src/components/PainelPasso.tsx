@@ -280,6 +280,13 @@ export function PainelPasso({
                 “falhou”: ele roda só quando algo dentro do escopo falhar. O conteúdo “Mensagem do erro” fica disponível para ele.
               </Aviso>
             )}
+            {def.id === 'builtin.para_cada' && (
+              <Aviso tipo="info" titulo="Python dentro do laço">
+                Se dentro do laço houver <strong>só um passo de código Python</strong>, sem novas tentativas nem tempo limite próprio, a Trama roda todos os itens
+                de uma vez, em um único contêiner isolado, bem mais rápido. Cada item continua com a sua linha no histórico. Com outros passos junto, ou com
+                tentativas ou tempo limite no passo, cada item roda separado.
+              </Aviso>
+            )}
             {campos}
             {def.id === 'builtin.python' && !somenteLeitura && (
               <div className="acoes-linha">
