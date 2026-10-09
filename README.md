@@ -9,7 +9,8 @@ Monte fluxos como no **Power Automate**: um *gatilho* e uma lista de *passos* em
 * **Frontend:** React + TypeScript (Vite), CodeMirror para o código. Interface toda em português do Brasil.
 * **API:** FastAPI (Python). Toda a lógica de validação e execução fica no backend.
 * **Persistência:** SQLite local (`data/trama.db`): projetos, blocos Python, histórico de execuções.
-* **Executor:** um contêiner Docker novo e descartável a cada execução de código do usuário.
+* **Executor:** um contêiner Docker novo e descartável a cada execução de código do usuário. Alguns já ficam iniciados esperando
+  (*pool aquecido*) para esconder o custo de subir o Docker; cada um atende um único trabalho e morre.
 
 É um MVP **local e de usuário único** (sem autenticação). Veja [Limitações verificadas](#limitações-verificadas).
 
@@ -169,11 +170,23 @@ entrega o trabalho por `stdin`. Cada execução é um contêiner novo com:
 | Sem rede | `--network none` (o teste confirma que só existe a interface `lo`) |
 | Sistema de arquivos restrito | `--read-only` + um único tmpfs de 16 MB em `/tmp` (sem `exec`); sem volumes, sem credenciais, sem o socket do Docker |
 | Memória / CPU / processos | `--memory` (sem swap) + `RLIMIT_AS`, `--cpus`, `--pids-limit`, `ulimit` de CPU/arquivos |
-| Tempo | limite brando dentro do runner (mostra a **linha** onde parou e preserva os logs; re-armado a cada 250 ms) + abate forçado pelo host com `docker kill` + **vigia dentro do contêiner** (`timeout` como PID 1, que o código não consegue encerrar e que mata tudo se a API morrer) + limite de tempo de CPU |
+| Tempo | limite brando dentro do runner (mostra a **linha** onde parou e preserva os logs; re-armado a cada 250 ms) + abate forçado pelo host com `docker kill` + **vigia dentro do contêiner** (`timeout` como PID 1, que o código não consegue encerrar e que mata tudo se a API morrer) + limite de tempo de CPU. Com o pool, o vigia e o limite de CPU do trabalho passam a valer só quando o trabalho chega |
 | Volume de saída e de dados | teto de logs, de resultado e de entrada; excesso → encerra com erro claro |
 | Resposta do runner | tratada como **não confiável**: o código do usuário roda no mesmo processo do runner e consegue forjá-la, então o host só aceita tipos, categorias e tamanhos conhecidos (logs truncados no limite, linha/trecho como número/texto) |
 | Erros | traduzidos para português; segredos conhecidos mascarados nos logs; `OOMKilled` distingue falta de memória de outros encerramentos |
 | Disco do host | `--log-driver none` (a saída não é duplicada no log do daemon) e `--pull never` |
+
+**Pool aquecido.** Por padrão (`TRAMA_POOL=2`) a Trama mantém 2 contêineres já iniciados, parados esperando o trabalho no `stdin`
+(`TRAMA_POOL=0` volta ao comportamento anterior, exatamente). Medido na máquina de desenvolvimento, a mediana de um passo Python
+passou de ~310 ms para ~150 ms (executor) e de ~350 ms para ~190 ms (fluxo inteiro com um passo Python). A regra de isolamento não muda: o contêiner sai do pool ao receber **um** trabalho, nunca volta, é removido
+ao terminar e o pool é reposto em segundo plano. Os ociosos têm as mesmas restrições dos demais (mesmas opções do `docker run`, rótulo `trama.executor=pool`) e rodam só um
+`bash` fixo que espera uma linha de partida do host com dois números. Quando ela chega, o `bash` aperta o limite de CPU para o do trabalho
+e vira o `timeout` de sempre (PID 1), então o vigia do trabalho conta a partir do recebimento. Sem trabalho, o ocioso se mata sozinho
+em `TRAMA_POOL_OCIOSO_S` (120 s) ou assim que a API morre; a API troca os vencidos antes disso. Se o Docker falhar ao repor ou o pool estiver vazio,
+o trabalho segue pelo caminho frio, sem erro. Só usam o pool os trabalhos com a mesma memória, CPUs e processos do padrão e tempo igual ou
+menor (é o caso do limite de tempo por passo); os demais vão pelo caminho frio. **Teto de contêineres vivos:** no máximo 4 de trabalho
+em andamento + `TRAMA_POOL` ociosos (6 no padrão, até 12 com `TRAMA_POOL=8`); cada ocioso custa um cliente `docker` (~30 MB de memória no host).
+`GET /api/sistema` mostra `pool` (configurado, prontos, acertos e faltas), sem nomes nem IDs de contêiner.
 
 A lista de bibliotecas permitidas dentro do runner é **só conveniência** (mensagem amigável); os testes contornam esse filtro de
 propósito para provar que o que protege é o contêiner. O processo da API precisa de acesso ao Docker — isso equivale a privilégio
@@ -204,7 +217,7 @@ backend/app/   models (formato v2), passos (percorrer a árvore), validation (ve
                historico (única porta de escrita do histórico), despacho, controle (condição, laços, escopo),
                passos_simples, dinamico, erros_sandbox, teste_bloco;
                store (SQLite), exchange (export/import), custom_blocks, blocks/builtin.py (passos internos),
-               sandbox/executor.py (Docker), api.py, main.py
+               sandbox/executor.py (Docker), sandbox/pool.py (pool aquecido), api.py, main.py
 executor/      Dockerfile + runner.py (roda DENTRO do contêiner)
 frontend/src/  components/ (Designer, PainelPasso, CampoDinamico, Verificador, PainelTeste, Historico…; EditorPage só compõe),
                hooks/ (estado com efeitos do editor: useProjeto, useCatalogo, useExecucao, useVisaoDeExecucao, useAtalhos,
@@ -245,6 +258,7 @@ O histórico de execuções antigas **não é convertido** (ele descrevia blocos
 | `TRAMA_DATA_DIR` | `./data` | onde fica o banco SQLite |
 | `TRAMA_EXECUTOR_IMAGE` | `trama-executor:2` | imagem do executor |
 | `TRAMA_TIMEOUT_S` / `TRAMA_MEMORY_MB` / `TRAMA_CPUS` / `TRAMA_PIDS` | `10` / `256` / `1` / `64` | limites do código Python |
+| `TRAMA_POOL` / `TRAMA_POOL_OCIOSO_S` | `2` / `120` | contêineres aquecidos esperando trabalho (`0` desliga; no máximo 8) e quanto um deles pode ficar parado sem receber trabalho |
 | `TRAMA_LOGS_KB` / `TRAMA_VALUE_KB` / `TRAMA_MAX_LIST_ITEMS` | `64` / `1024` / `10000` | volume de logs, tamanho de cada valor, itens por lista |
 | `TRAMA_HOST` / `TRAMA_PORT` | `127.0.0.1` / `8000` | só local por padrão (não há autenticação) |
 | `TRAMA_ALLOWED_HOSTS` / `TRAMA_ALLOWED_ORIGINS` | localhost… / vazio | proteção contra requisições de outros sites |
@@ -256,7 +270,7 @@ O histórico de execuções antigas **não é convertido** (ele descrevia blocos
 ## Testes
 
 ```bash
-make test-backend    # 280 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
+make test-backend    # 458 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
 make test-frontend   # typecheck + 20 testes unitários (vitest) das operações sobre o fluxo
 make e2e             # 27 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
                      # 1ª vez: `cd frontend && npx playwright install chromium` (ou PLAYWRIGHT_CHROMIUM_PATH=/caminho/do/chrome)
@@ -284,6 +298,9 @@ O isolamento é verificado **de dentro do contêiner**: usuário 65534, rootfs s
 capacidades zeradas, `NoNewPrivs`, seccomp ativo, limites de memória/pids/CPU lidos do cgroup, bomba de processos contida, sem
 variáveis de ambiente nem arquivos do host, estado não compartilhado entre execuções, logs/saída excessivos, e a recusa sem Docker.
 Para o executor também foi feita uma checagem de mutação: remover `--network none`, `--read-only` ou o limite de memória faz algum teste falhar.
+Os testes de isolamento de `test_executor.py` rodam duas vezes, com um contêiner novo por trabalho e com o pool aquecido; `test_pool.py` cobre a lógica do pool,
+o comando e o script do contêiner ocioso (sem Docker) e `test_pool_docker.py` prova, com o Docker, um contêiner por trabalho, o ocioso que expira,
+a API morta, o desligamento, o teto de contêineres e a queda para o caminho frio.
 
 ---
 
@@ -309,13 +326,16 @@ dados malformados. Os mesmos testes foram portados para o formato em passos (a s
   terceiros realmente hostil, rode a API em um host dedicado e considere gVisor/Kata/Firecracker ou Docker rootless.
 * Testado em **Linux, Docker Engine 29, cgroup v1** (os testes de cgroup também leem o caminho do v2, mas só o v1 foi exercitado).
   **Não testado** em macOS/Windows (Docker Desktop), Podman ou Docker rootless.
-* Cada execução de código Python inicia um contêiner (**≈1 s de sobrecarga**). Um fluxo com N passos Python paga N inícios; um passo Python dentro de um
-  *Para cada* paga um início **por item**. No máximo 4 contêineres rodam em paralelo.
+* Cada execução de código Python usa um contêiner só dela. Sem o pool (`TRAMA_POOL=0`), ou quando ele está vazio, isso custa o **início do contêiner** (≈300 ms na máquina de
+  desenvolvimento, ≈1 s em máquinas mais lentas); com o pool, esse custo some enquanto houver ocioso pronto, mas um passo ainda leva ~150 ms (o Python da imagem
+  precisa subir) e um passo Python dentro de um *Para cada* paga isso **por item** (50 itens: ~8 s medidos; a execução em lote do laço ainda não existe).
+  No máximo 4 contêineres de trabalho rodam em paralelo, mais os ociosos do pool.
 * A **tentativa de cancelar** interrompe o fluxo entre passos (e a espera entre tentativas); um código Python já em andamento termina ou estoura o limite de tempo.
   Se o servidor reiniciar no meio, as execuções ficam marcadas como falha. Rode **um único processo** do servidor.
 * O histórico de execuções **não tem política de retenção** (cresce até o projeto ser excluído).
 * Dentro do contêiner ainda são legíveis metadados do host sem segredos (`/proc/version`, `/proc/meminfo`, `mountinfo`, `/etc/resolv.conf`); como não há rede, não há o que fazer com eles.
 * Se a API morrer no meio de uma execução, o vigia encerra o contêiner em até ≈ (limite de tempo + folga + 5) s; contêineres que sobrarem são removidos na próxima inicialização.
+  Os ociosos do pool terminam sozinhos assim que a API morre (ou em `TRAMA_POOL_OCIOSO_S`), mas, como o contêiner não usa `--rm`, ficam parados no Docker até a próxima inicialização.
 * **Inteiros acima de 2^53** (≈ 9×10^15) perdem precisão quando passam pelo navegador (limite do JSON do JavaScript). O backend e o Python os preservam; use texto para identificadores longos.
 
 **Produto**

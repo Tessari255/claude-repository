@@ -23,4 +23,6 @@ WORKDIR /tmp
 # `timeout` roda como PID 1 do contêiner: é um vigia que o código do usuário não consegue encerrar e que mata
 # tudo se o host (a API) morrer no meio da execução. O host passa os segundos e o comando (constantes, nunca
 # dados do usuário): `docker run ... IMAGEM <segundos> python -I /opt/trama/runner.py`.
+# No pool aquecido o host troca o ENTRYPOINT por `bash` (script fixo em sandbox/executor.py): o contêiner espera o trabalho
+# parado e, quando ele chega, vira este mesmo `timeout` por `exec`, então o vigia do trabalho conta desde o recebimento.
 ENTRYPOINT ["timeout", "-s", "KILL"]

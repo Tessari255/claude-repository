@@ -204,6 +204,7 @@ export interface SystemInfo {
   name: string
   version: string
   executor: ExecutorStatus
+  pool: { configurado: number; prontos: number; ocioso_s: number; acertos: number; faltas: number }
   limits: { time_s: number; memory_mb: number; cpus: number; value_kb: number; logs_kb: number; max_list_items: number }
 }
 
