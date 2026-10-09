@@ -54,3 +54,5 @@ export function useCatalogo() {
 
   return { defs, biblioteca, sistema, iniciar, defDe, ultimasVersoes, garantirDefs, registrar, aposSalvarBloco }
 }
+
+export type Catalogo = ReturnType<typeof useCatalogo>

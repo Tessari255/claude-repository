@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiFailure } from '../api'
 import {
   achar, acharQualquer, chaveDoTipo, contextoDoPasso, definicaoEfetiva, duplicar, inserir, linhaDoPasso, mover, nomeDoPasso, novoPasso, profundidadeDoDestino,
@@ -6,12 +6,11 @@ import {
 } from '../lib/modelo'
 import { useAtalhos } from '../hooks/useAtalhos'
 import { useCatalogo } from '../hooks/useCatalogo'
-import { useHistorico } from '../hooks/useHistorico'
+import { useProjeto } from '../hooks/useProjeto'
 import { useVisaoDeExecucao } from '../hooks/useVisaoDeExecucao'
 import { useVivo } from '../hooks/useVivo'
-import { montarDefs } from '../lib/catalogo'
 import { slugDeId } from '../lib/visual'
-import type { BlockType, Flow, Issue, Passo, PortTypes, Project, Run } from '../types'
+import type { BlockType, Passo, Run } from '../types'
 import { BlockEditorDialog } from './BlockEditorDialog'
 import { Designer, type AcaoDoPasso } from './Designer'
 import { AtalhosDialog } from './Dialogs'
@@ -46,87 +45,36 @@ const dormir = (ms: number) => new Promise((r) => window.setTimeout(r, ms))
 
 export function EditorPage({ projectId, onSair }: { projectId: string; onSair: () => void }) {
   const notificar = useNotificar()
-  const [falhaCarga, setFalhaCarga] = useState<ApiFailure | null>(null)
-  const [projeto, setProjeto] = useState<Project | null>(null)
-  const [nome, setNome] = useState('')
-  const hist = useHistorico<Flow>()
-  const flowAtual = hist.atual
   const catalogo = useCatalogo()
   const { biblioteca, sistema, defDe, ultimasVersoes } = catalogo
-  const [analise, setAnalise] = useState<{ issues: Issue[]; port_types: PortTypes }>({ issues: [], port_types: {} })
-  const [verificando, setVerificando] = useState(false)
-  const [salvoJson, setSalvoJson] = useState<string | null>(null)
-  const [salvando, setSalvando] = useState(false)
+  const visao = useVisaoDeExecucao()
+  const { iteracoes, voltar: voltarAoFluxo } = visao
+  const somenteLeitura = visao.atual !== null
+  const {
+    falhaCarga, projeto, nome, setNome, hist, fluxoJson, sujo, salvando, salvar: salvarProjeto, analise, verificando, revalidar, rascunhoAtual,
+  } = useProjeto(projectId, catalogo, somenteLeitura)
+  const flowAtual = hist.atual
   const [selecionadoId, setSelecionadoId] = useState<string | null>(null)
   const [painel, setPainel] = useState<Painel>(null)
   const [destino, setDestino] = useState<Destino | null>(null)
   const [run, setRun] = useState<Run | null>(null)
   const [executando, setExecutando] = useState(false)
   const [historicoRuns, setHistoricoRuns] = useState<Run[]>([])
-  const visao = useVisaoDeExecucao()
-  const { iteracoes, voltar: voltarAoFluxo } = visao
   const [dialogo, setDialogo] = useState<Dialogo>(null)
   const [iniciarTeste, setIniciarTeste] = useState(false)
 
   const vivo = useVivo()
-  const contadorValidacao = useRef(0)
-  const estado = useRef({ flow: flowAtual, nome, projeto })
-  estado.current = { flow: flowAtual, nome, projeto }
 
   const flow = visao.atual?.flow ?? flowAtual
-  const somenteLeitura = visao.atual !== null
   const runVisivel = visao.atual ? visao.atual.run : run
 
-  // -------------------------------------------------------------------------- carga inicial
+  const idDoProjeto = projeto?.id
   useEffect(() => {
+    if (!idDoProjeto) return
     let cancelado = false
-    ;(async () => {
-      try {
-        const [p, blocos, sis] = await Promise.all([api.projeto(projectId), api.blocos(), api.sistema()])
-        const defs = await montarDefs(blocos, p.flow, api.versaoDoBloco)
-        if (cancelado) return
-        setProjeto(p); setNome(p.name)
-        catalogo.iniciar({ defs, biblioteca: blocos, sistema: sis })
-        hist.reiniciar(p.flow)
-        setSalvoJson(JSON.stringify(p.flow))
-        api.historico(p.id).then((h) => !cancelado && setHistoricoRuns(h)).catch(() => undefined)
-      } catch (e) {
-        if (!cancelado) setFalhaCarga(e as ApiFailure)
-      }
-    })()
+    api.historico(idDoProjeto).then((h) => !cancelado && setHistoricoRuns(h)).catch(() => undefined)
     return () => { cancelado = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId])
-
-  // -------------------------------------------------------------------------- derivados
-  const fluxoJson = useMemo(() => (flowAtual ? JSON.stringify(flowAtual) : ''), [flowAtual])
-  const sujo = salvoJson !== null && !somenteLeitura && (fluxoJson !== salvoJson || nome !== projeto?.name)
-
-  useEffect(() => {
-    const aviso = (e: BeforeUnloadEvent) => { if (sujo) { e.preventDefault(); e.returnValue = '' } }
-    window.addEventListener('beforeunload', aviso)
-    return () => window.removeEventListener('beforeunload', aviso)
-  }, [sujo])
-
-  // verificação contínua (o servidor é a única fonte de verdade das regras)
-  const revalidar = useCallback(async () => {
-    const f = estado.current.flow
-    if (!f) return
-    const minha = ++contadorValidacao.current
-    setVerificando(true)
-    try {
-      const r = await api.validar(f)
-      if (vivo.current && minha === contadorValidacao.current) setAnalise({ issues: r.issues, port_types: r.port_types })
-    } catch { /* sem conexão: mantém a última análise */ } finally {
-      if (vivo.current && minha === contadorValidacao.current) setVerificando(false)
-    }
-  }, [vivo])
-
-  useEffect(() => {
-    if (salvoJson === null || somenteLeitura) return
-    const t = window.setTimeout(revalidar, 350)
-    return () => window.clearTimeout(t)
-  }, [fluxoJson, salvoJson, revalidar, sistema?.executor.disponivel, somenteLeitura])
+  }, [idDoProjeto])
 
   const erros = useMemo(() => analise.issues.filter((i) => i.severity === 'erro'), [analise.issues])
   const executorOk = sistema?.executor.disponivel ?? false
@@ -206,29 +154,11 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
 
   // -------------------------------------------------------------------------- salvar / exportar
   const salvar = useCallback(async (): Promise<boolean> => {
-    const { flow: f, nome: n, projeto: p } = estado.current
-    if (!p || !f || salvando || somenteLeitura) return false
-    setSalvando(true)
-    try {
-      const salvo = await api.salvarProjeto(p.id, { name: n.trim() || p.name, flow: f, base_revision: p.revision })
-      setProjeto(salvo)
-      setNome(salvo.name)
-      setSalvoJson(JSON.stringify(f))
-      notificar.sucesso('Fluxo salvo')
-      void revalidar()
-      return true
-    } catch (e) {
-      const x = e as ApiFailure
-      if (x.code === 'conflito_de_revisao') setDialogo({ tipo: 'conflito' })
-      else {
-        notificar.erro('Não foi possível salvar', `${x.message} ${x.issues[0]?.message ?? ''}`.trim())
-        if (x.issues.length) { setAnalise((a) => ({ ...a, issues: x.issues })); setPainel('verificador') }
-      }
-      return false
-    } finally {
-      setSalvando(false)
-    }
-  }, [salvando, somenteLeitura, notificar, revalidar])
+    const r = await salvarProjeto()
+    if (r === 'conflito') setDialogo({ tipo: 'conflito' })
+    else if (r === 'invalido') setPainel('verificador')
+    return r === 'salvo'
+  }, [salvarProjeto])
 
   async function exportar() {
     if (!flow) return
@@ -251,7 +181,8 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
         const atual = r.steps.find((s) => s.state === 'executando')
         if (atual && atual.step_id !== anterior) {
           anterior = atual.step_id
-          const p = estado.current.flow ? acharQualquer(estado.current.flow, atual.step_id) : null
+          const f = rascunhoAtual().flow
+          const p = f ? acharQualquer(f, atual.step_id) : null
           notificar.anunciar(`Executando ${p ? nomeDoPasso(p, undefined) : 'passo'}.`)
         }
         if (['concluido', 'falhou', 'cancelado'].includes(r.state)) {
@@ -269,10 +200,10 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
         api.historico(projectId).then((h) => vivo.current && setHistoricoRuns(h)).catch(() => undefined)
       }
     }
-  }, [notificar, projectId, vivo])
+  }, [notificar, projectId, vivo, rascunhoAtual])
 
   const testar = useCallback(async (dados?: Record<string, unknown>) => {
-    const { flow: f, projeto: p } = estado.current
+    const { flow: f, projeto: p } = rascunhoAtual()
     if (!p || !f || executando) return
     if (f.steps.length === 0) {
       notificar.info('O fluxo está vazio', 'Adicione ao menos um passo antes de testar.')
@@ -293,7 +224,7 @@ export function EditorPage({ projectId, onSair }: { projectId: string; onSair: (
         notificar.erro('O fluxo não foi testado', `${x.issues.length} ${x.issues.length === 1 ? 'problema precisa' : 'problemas precisam'} ser corrigido(s). Veja o verificador de fluxo.`)
       } else notificar.erro('Não foi possível testar', [x.message, x.issues[0]?.message].filter(Boolean).join(' '))
     }
-  }, [executando, acompanhar, revalidar, notificar, voltarAoFluxo])
+  }, [executando, acompanhar, revalidar, notificar, voltarAoFluxo, rascunhoAtual])
 
   function abrirTeste(iniciar = false) {
     setIniciarTeste(iniciar)
