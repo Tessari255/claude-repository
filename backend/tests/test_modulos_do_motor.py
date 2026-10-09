@@ -16,6 +16,7 @@ from typing import cast
 
 import pytest
 
+from app import teste_bloco
 from app.blocks.builtin import ContextoBloco
 from app.config import Limites
 from app.controle import Controle, deve_rodar, motivo_ignorado
@@ -35,7 +36,8 @@ from .helpers import campo, compor, condicao, fluxo, lit, matematica, passo, pyt
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "despacho", "preparo", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "dinamico", "passos_simples", "controle", "despacho", "preparo",
+           "teste_bloco", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -609,3 +611,49 @@ def test_dados_do_gatilho_com_varios_problemas_sao_apontados_de_uma_vez(sem_dock
     assert any("não tem o campo “extra”" in m for m in mensagens)
     assert any("“Idade” deveria ser número" in m for m in mensagens)
     assert any(m == "Preencha o campo “Nome” do gatilho." for m in mensagens)
+
+
+# ------------------------------------------------------------------ teste isolado de um bloco
+def _teste_de_bloco(sem_docker):
+    historico = Historico(sem_docker.store)
+    simples = PassosSimples(historico, cast(DockerExecutor, ExecutorFalso()), Limites())
+    # o módulo é importado inteiro: pytest tentaria coletar uma classe importada cujo nome começa com Test
+    return teste_bloco.TesteDeBloco(sem_docker.store, historico, simples, Limites()), simples
+
+
+def test_exemplo_com_varios_problemas_e_recusado_apontando_todos_de_uma_vez(sem_docker):
+    tipo = sem_docker.registro.resolver("builtin.matematica", 1)
+    with pytest.raises(ApiError) as exc:
+        teste_bloco.conferir_exemplo(tipo, {"operacao": "somar"}, {"a": "x", "zzz": 1})
+    assert exc.value.status == 422 and exc.value.codigo == "teste_invalido"
+    assert sorted((p["code"], p.get("field")) for p in exc.value.problemas) == [
+        ("entrada_desconhecida", None), ("entrada_obrigatoria", "b"), ("tipo_incompativel", "a")]
+    teste_bloco.conferir_exemplo(tipo, {"operacao": "somar"}, {"a": 1, "b": 2})  # exemplo bom não levanta
+
+
+def test_teste_de_bloco_registra_uma_execucao_do_tipo_bloco_com_a_linha_do_passo(sem_docker):
+    teste, _ = _teste_de_bloco(sem_docker)
+    tipo = sem_docker.registro.resolver("builtin.matematica", 1)
+    run = teste.testar(tipo, {"operacao": "multiplicar"}, {"a": 6, "b": 7}, None)
+    assert (run["kind"], run["state"]) == ("bloco", "concluido")
+    assert run["result"] == {"outputs": [{"step_id": "teste", "title": tipo.name, "value": {"resultado": 42}}]}
+    assert [(s["step_id"], s["state"], s["inputs"], s["outputs"]) for s in run["steps"]] == [
+        ("teste", "concluido", {"a": 6, "b": 7}, {"resultado": 42})]
+
+
+def test_falha_do_bloco_testado_fica_no_passo_e_na_execucao_sem_resultado(sem_docker):
+    teste, _ = _teste_de_bloco(sem_docker)
+    tipo = sem_docker.registro.resolver("builtin.matematica", 1)
+    run = teste.testar(tipo, {"operacao": "dividir"}, {"a": 1, "b": 0}, None)
+    assert run["state"] == "falhou" and run["result"] == {"outputs": []}
+    assert run["error"]["code"] == "divisao_por_zero" and run["error"]["step_id"] == "teste" and run["error"]["step_name"] == tipo.name
+    assert run["steps"][0]["state"] == "falhou" and run["steps"][0]["error"]["code"] == "divisao_por_zero"
+
+
+def test_erro_inesperado_ao_testar_um_bloco_nao_vaza_detalhes_internos(sem_docker, caplog):
+    teste, simples = _teste_de_bloco(sem_docker)
+    simples.executar = _levantar(RuntimeError("segredo do servidor"))
+    run = teste.testar(sem_docker.registro.resolver("builtin.matematica", 1), {"operacao": "somar"}, {"a": 1, "b": 2}, None)
+    assert run["state"] == "falhou" and run["error"]["code"] == "erro_interno"
+    assert run["steps"][0]["error"]["technical"] == {"type": "RuntimeError"}
+    assert "segredo do servidor" not in str(run) and "segredo do servidor" in caplog.text
