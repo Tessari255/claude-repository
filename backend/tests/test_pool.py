@@ -28,6 +28,7 @@ class Fabrica:
         self.falhar = False
         self.explodir = False
         self.segurar: threading.Event | None = None  # enquanto não for liberado, iniciar() fica esperando
+        self.atraso_do_descarte = 0.0
         self.tentativas = 0
 
     def iniciar(self) -> Aquecido | None:
@@ -44,6 +45,7 @@ class Fabrica:
         return q
 
     def descartar(self, lista: list[Aquecido]) -> None:
+        time.sleep(self.atraso_do_descarte)
         for q in lista:
             q.proc.kill()
             q.proc.wait()
@@ -150,6 +152,22 @@ def test_morto_que_ainda_estava_no_pool_nao_e_entregue(fabrica):
     primeiro.proc.wait()
     escolhido = pool.retirar()  # pode chegar antes da varredura em segundo plano
     assert escolhido is not None and escolhido is not primeiro
+    pool.encerrar()
+
+
+def test_remover_morto_lento_nao_atrasa_quem_pede_um_trabalho(fabrica):
+    fabrica.atraso_do_descarte = 1.0  # `docker rm` demorado
+    pool = montar(fabrica, tamanho=2)
+    pool.ativar()
+    esperar(lambda: pool.estado()["prontos"] == 2)
+    primeiro = fabrica.criados[0]
+    primeiro.proc.kill()
+    primeiro.proc.wait()
+    inicio = time.monotonic()
+    escolhido = pool.retirar()  # topa com o morto, mas não é ele quem o remove
+    assert escolhido is not None and escolhido is not primeiro
+    assert time.monotonic() - inicio < 0.3
+    esperar(lambda: primeiro in fabrica.descartados, limite_s=5)  # a thread do pool cuida disso
     pool.encerrar()
 
 

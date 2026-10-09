@@ -49,6 +49,7 @@ class PoolAquecido:
         self._lock = threading.Lock()
         self._acordar = threading.Event()
         self._prontos: deque[Aquecido] = deque()
+        self._lixo: list[Aquecido] = []  # mortos achados por retirar(); quem os remove é a thread do pool, não o chamador
         self._iniciando = 0
         self._lancadores: set[threading.Thread] = set()
         self._ativo = False
@@ -80,8 +81,9 @@ class PoolAquecido:
             self._ativo = False
             mantenedor = self._mantenedor
             lancadores = list(self._lancadores)
-            sobras = list(self._prontos)
+            sobras = [*self._prontos, *self._lixo]
             self._prontos.clear()
+            self._lixo.clear()
         self._acordar.set()
         if mantenedor is not None and mantenedor is not threading.current_thread():
             mantenedor.join(timeout=5)
@@ -93,7 +95,6 @@ class PoolAquecido:
     # -------------------------------------------------------------------- uso
     def retirar(self) -> Aquecido | None:
         """Entrega o contêiner pronto mais antigo, ou None se não houver (o chamador usa o caminho frio)."""
-        mortos: list[Aquecido] = []
         escolhido: Aquecido | None = None
         with self._lock:
             while self._prontos:
@@ -101,14 +102,12 @@ class PoolAquecido:
                 if self._vivo(candidato):
                     escolhido = candidato
                     break
-                mortos.append(candidato)
+                self._lixo.append(candidato)
             if escolhido is None:
                 self._faltas += 1
             else:
                 self._acertos += 1
-        if mortos:
-            self._descartar(mortos)
-        self._acordar.set()  # repor o que saiu (ou o que morreu)
+        self._acordar.set()  # repor o que saiu e remover o que morreu, em segundo plano
         return escolhido
 
     def estado(self) -> dict[str, Any]:
@@ -125,10 +124,10 @@ class PoolAquecido:
     def _manter(self, geracao: int) -> None:
         while True:
             self._acordar.clear()
-            descartados: list[Aquecido] = []
             with self._lock:
                 if not self._ativo or geracao != self._geracao:
                     return
+                descartados, self._lixo = self._lixo, []
                 restantes: deque[Aquecido] = deque()
                 for q in self._prontos:
                     (restantes if self._vivo(q) else descartados).append(q)
