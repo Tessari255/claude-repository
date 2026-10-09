@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .engine import erro_da_sandbox
 from .errors import ApiError
+from .erros_sandbox import erro_da_sandbox
 from .models import BlockDraft, BlockType
 from .registry import Registro
 from .sandbox import DockerExecutor
