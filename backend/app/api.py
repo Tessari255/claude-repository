@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import custom_blocks, exchange
 from .config import Settings
@@ -223,15 +223,7 @@ def criar_router(s: Servicos) -> APIRouter:
     # ----------------------------------------------------------------- execuções
     @r.post("/projetos/{pid}/execucoes", status_code=202)
     def executar(pid: str, corpo: ExecucaoEntrada) -> dict[str, Any]:
-        projeto = s.store.obter_projeto(pid)
-        if projeto is None:
-            raise ApiError(404, "projeto_nao_encontrado", "Projeto não encontrado.")
-        try:
-            flow = corpo.flow or Flow.model_validate(projeto["flow"])
-        except ValidationError:
-            raise ApiError(422, "fluxo_invalido", "O fluxo salvo está corrompido.") from None
-        run_id = s.motor.preparar(flow, pid, corpo.trigger_inputs)
-        s.motor.despachar(run_id)
+        run_id = s.motor.iniciar(pid, corpo.trigger_inputs, corpo.flow)
         return s.store.obter_execucao(run_id)  # type: ignore[return-value]
 
     @r.get("/projetos/{pid}/execucoes")

@@ -19,8 +19,11 @@ import threading
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from .config import Limites
 from .despacho import Despacho
+from .errors import ApiError
 from .execucao import MAX_REGISTROS, Cancelado, Encerrado, Execucao
 from .historico import Historico
 from .models import BlockType, Flow
@@ -62,6 +65,25 @@ class Motor:
         """Valida TUDO antes de executar e cria o registro da execução (estado: aguardando)."""
         return preparar_execucao(flow, project_id, dados_gatilho, registro=self.registro, executor=self.executor,
                                  limites=self.limites, historico=self.historico)
+
+    def iniciar(self, project_id: str, dados_gatilho: dict[str, Any] | None = None, flow: Flow | None = None) -> str:
+        """Inicia uma execução do projeto a partir de um gatilho e devolve o id dela (a execução segue em segundo plano).
+
+        É o único caminho para começar uma execução e não depende de HTTP: a API (gatilho manual) passa por aqui, e é
+        por aqui que devem passar também o agendador e o webhook. ``flow`` só vem preenchido quando o chamador executa
+        uma versão ainda não salva; sem ele vale o fluxo salvo do projeto. Levanta ApiError sem criar nada se o projeto
+        não existe, o fluxo está corrompido ou inválido, ou os dados do gatilho não servem.
+        """
+        projeto = self.store.obter_projeto(project_id)
+        if projeto is None:
+            raise ApiError(404, "projeto_nao_encontrado", "Projeto não encontrado.")
+        try:
+            fluxo = flow or Flow.model_validate(projeto["flow"])
+        except ValidationError:
+            raise ApiError(422, "fluxo_invalido", "O fluxo salvo está corrompido.") from None
+        run_id = self.preparar(fluxo, project_id, dados_gatilho)
+        self.despachar(run_id)
+        return run_id
 
     def despachar(self, run_id: str) -> None:
         with self._trava:

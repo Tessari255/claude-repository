@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import cast
@@ -31,7 +32,7 @@ from app.passos_simples import PassosSimples
 from app.preparo import preparar_execucao
 from app.sandbox import DockerExecutor, ExecutorStatus, SandboxResult
 
-from .helpers import campo, compor, condicao, fluxo, lit, matematica, passo, python_inline, ref, saida, tpl
+from .helpers import aguardar, campo, compor, condicao, fluxo, lit, matematica, passo, python_inline, ref, saida, tpl
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -657,3 +658,67 @@ def test_erro_inesperado_ao_testar_um_bloco_nao_vaza_detalhes_internos(sem_docke
     assert run["state"] == "falhou" and run["error"]["code"] == "erro_interno"
     assert run["steps"][0]["error"]["technical"] == {"type": "RuntimeError"}
     assert "segredo do servidor" not in str(run) and "segredo do servidor" in caplog.text
+
+
+# ------------------------------------------------------------------ iniciar uma execução (sem HTTP)
+def _soma(a=2, b=3):
+    return fluxo([matematica("soma", ref("gatilho", "a"), ref("gatilho", "b")), saida("saida", "Soma", ref("soma", "resultado"))],
+                 [campo("a", "numero", a), campo("b", "numero", b)])
+
+
+def _esperar_terminar(store, run_id, limite_s=10.0):
+    fim = time.monotonic() + limite_s
+    while time.monotonic() < fim:
+        run = store.obter_execucao(run_id)
+        if run["state"] in ("concluido", "falhou", "cancelado"):
+            return run
+        time.sleep(0.05)
+    raise AssertionError("a execução não terminou a tempo")
+
+
+def test_iniciar_roda_o_fluxo_salvo_do_projeto_em_segundo_plano_sem_passar_pela_api(sem_docker):
+    projeto = sem_docker.store.criar_projeto("Soma", "", _soma())
+    run_id = sem_docker.motor.iniciar(projeto["id"], {"a": 10})
+    run = _esperar_terminar(sem_docker.store, run_id)
+    assert run["state"] == "concluido" and run["project_id"] == projeto["id"] and run["trigger_inputs"] == {"a": 10}
+    assert run["result"]["outputs"] == [{"step_id": "saida", "title": "Soma", "value": 13}]
+    sem_docker.motor.encerrar()
+
+
+def test_iniciar_com_fluxo_explicito_executa_esse_e_nao_o_salvo(sem_docker):
+    projeto = sem_docker.store.criar_projeto("Soma", "", _soma(1, 1))
+    run_id = sem_docker.motor.iniciar(projeto["id"], None, Flow.model_validate(_soma(40, 2)))
+    assert _esperar_terminar(sem_docker.store, run_id)["result"]["outputs"][0]["value"] == 42
+    sem_docker.motor.encerrar()
+
+
+def test_iniciar_recusa_sem_criar_execucao_projeto_inexistente_fluxo_corrompido_ou_invalido(sem_docker, settings):
+    corrompido = sem_docker.store.criar_projeto("Quebrado", "", {"schema_version": 2, "steps": "isto não é uma lista"})
+    invalido = sem_docker.store.criar_projeto("Inválido", "", fluxo([passo("m", "builtin.matematica", {"a": lit(1)}, {"operacao": "somar"})]))
+    esperado = [("prj_nao_existe", 404, "projeto_nao_encontrado", "Projeto não encontrado."),
+                (corrompido["id"], 422, "fluxo_invalido", "O fluxo salvo está corrompido."),
+                (invalido["id"], 422, "fluxo_invalido", "O fluxo tem problemas e não foi executado.")]
+    for pid, status, codigo, mensagem in esperado:
+        with pytest.raises(ApiError) as exc:
+            sem_docker.motor.iniciar(pid)
+        assert (exc.value.status, exc.value.codigo) == (status, codigo), pid
+        assert exc.value.mensagem.startswith(mensagem), pid
+    with closing(sqlite3.connect(settings.db_path)) as c:
+        assert c.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_a_rota_de_executar_inicia_pelo_motor_e_devolve_a_execucao_criada(client_sem_docker, monkeypatch):
+    c = client_sem_docker
+    pid = c.post("/api/projetos", json={"name": "Soma", "flow": _soma()}).json()["id"]
+    motor = c.app.state.servicos.motor
+    original, chamadas = motor.iniciar, []
+
+    def espiao(*args, **kwargs):
+        chamadas.append((args, kwargs))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(motor, "iniciar", espiao)
+    resposta = c.post(f"/api/projetos/{pid}/execucoes", json={"trigger_inputs": {"a": 4}})
+    assert resposta.status_code == 202 and resposta.json()["project_id"] == pid
+    assert chamadas == [((pid, {"a": 4}, None), {})]
+    assert aguardar(c, resposta.json()["id"])["result"]["outputs"][0]["value"] == 7
+    assert c.post("/api/projetos/prj_nao_existe/execucoes", json={}).status_code == 404
