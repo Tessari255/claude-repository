@@ -15,13 +15,16 @@ import pytest
 
 from app.errors import ErroBloco
 from app.erros_sandbox import NAO_REPETIR, erro_da_sandbox
-from app.execucao import Cancelado, Execucao, chave_etapa, falha_de
+from app.execucao import MAX_REGISTROS, Cancelado, Execucao, chave_etapa, falha_de
+from app.historico import Historico
 from app.models import Flow
+
+from .helpers import campo, compor, fluxo, lit, passo, ref, saida
 
 BACKEND = Path(__file__).resolve().parents[1]
 
 # Camadas de baixo para cima; só engine.py (a fachada) pode ficar no topo.
-MODULOS = ["erros_sandbox", "execucao", "engine"]
+MODULOS = ["erros_sandbox", "execucao", "historico", "engine"]
 
 
 # ------------------------------------------------------------------ arquitetura
@@ -106,3 +109,65 @@ def test_falha_de_leva_a_linha_do_erro_tecnico_para_o_nivel_de_cima():
         "suggestion": "Revise.", "line": 4, "technical": {"line": 4, "type": "KeyError"}}
     sem_tecnico = falha_de("p2", "Outro", ErroBloco("Falhou."))
     assert sem_tecnico["line"] is None and sem_tecnico["technical"] is None and sem_tecnico["code"] == "erro_bloco"
+
+
+# ------------------------------------------------------------------ histórico
+ESCRITAS = ("criar_execucao", "atualizar_execucao", "garantir_etapa", "atualizar_etapa", "encerrar_etapas_abertas")
+
+
+def _execucao_com_linha(store, etapas=("a",)):
+    historico = Historico(store)
+    rid = historico.criar_execucao(kind="fluxo", project_id=None, snapshot={}, etapas=list(etapas))
+    ex = Execucao(run_id=rid, flow=Flow(steps=[]), defs={}, port_types={}, trigger_inputs={}, cancelar=threading.Event(),
+                  posicao=store.contar_etapas(rid))
+    return historico, ex
+
+
+def test_gravar_etapa_so_cria_a_linha_da_repeticao_na_primeira_vez(sem_docker):
+    historico, ex = _execucao_com_linha(sem_docker.store)
+    historico.gravar_etapa(ex, "a", (), state="executando")  # a linha do passo já nasceu com a execução
+    assert (ex.posicao, ex.registros) == (1, 0)
+    historico.gravar_etapa(ex, "a", (0,), state="executando")
+    historico.gravar_etapa(ex, "a", (0,), state="concluido", outputs={"x": 1})
+    assert (ex.posicao, ex.registros) == (2, 1)
+    linhas = sem_docker.store.obter_execucao(ex.run_id)["steps"]
+    assert [(p["iteration"], p["position"], p["state"]) for p in linhas] == [([], 0, "executando"), ([0], 1, "concluido")]
+    assert linhas[1]["outputs"] == {"x": 1}
+
+
+def test_gravar_etapa_recusa_passar_do_limite_de_registros_da_execucao(sem_docker):
+    historico, ex = _execucao_com_linha(sem_docker.store)
+    ex.max_registros = 2
+    historico.gravar_etapa(ex, "a", (0,))
+    historico.gravar_etapa(ex, "a", (1,))
+    with pytest.raises(ErroBloco) as exc:
+        historico.gravar_etapa(ex, "a", (2,))
+    assert exc.value.codigo == "registros_demais" and "limite de 2 registros" in exc.value.mensagem
+    assert Execucao(run_id="r", flow=Flow(steps=[]), defs={}, port_types={}, trigger_inputs={},
+                    cancelar=threading.Event()).max_registros == MAX_REGISTROS
+
+
+def test_toda_escrita_do_historico_passa_pela_classe_historico(sem_docker, monkeypatch):
+    """Se alguém gravar direto no banco (sem passar por Historico), este teste acusa: é o ponto onde entrarão os eventos."""
+    chamadas: list[tuple[str, str]] = []
+
+    def espionar(nome):
+        original = getattr(sem_docker.store, nome)
+
+        def espiao(*args, **kwargs):
+            chamadas.append((nome, sys._getframe(1).f_globals["__name__"]))
+            return original(*args, **kwargs)
+        monkeypatch.setattr(sem_docker.store, nome, espiao)
+
+    for nome in ESCRITAS:
+        espionar(nome)
+    laco = passo("laco", "builtin.para_cada", {"lista": ref("gatilho", "l")}, {"limite": 5}, slots={"corpo": [compor("x", lit(1))]})
+    execucoes = [
+        fluxo([laco, saida("s", "n", ref("laco", "quantidade"))], [campo("l", "lista", [1, 2])]),
+        fluxo([passo("fim", "builtin.encerrar", {"mensagem": lit("parei")}, {"estado": "falha"}), compor("depois", lit(1))]),
+    ]
+    for f in execucoes:
+        sem_docker.executar(f)
+    sem_docker.motor.testar_bloco(sem_docker.registro.resolver("builtin.matematica", 1), {"operacao": "somar"}, {"a": 1, "b": 2})
+    assert {nome for nome, _ in chamadas} == set(ESCRITAS)  # o roteiro exercita todos os tipos de escrita
+    assert {quem for _, quem in chamadas} == {"app.historico"}

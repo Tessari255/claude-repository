@@ -62,6 +62,7 @@ class Execucao:
     nomes: dict[str, str] = field(default_factory=dict)
     posicao: int = 0
     registros: int = 0
+    max_registros: int = MAX_REGISTROS
 
     def checar_cancelamento(self) -> None:
         if self.cancelar.is_set():
