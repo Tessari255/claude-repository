@@ -14,7 +14,7 @@ import pytest
 
 from app.config import Limites, carregar_settings
 from app.sandbox import ExecutorStatus, SandboxResult, corpo_max_do_lote, tempo_do_lote
-from app.sandbox.executor import PREFIXO, _tem_rotulo_de_lote
+from app.sandbox.executor import PREFIXO, ROTULO_LOTE, _tem_rotulo
 from app.sandbox.lote import EntregaDoLote, LeitorDeLote
 
 
@@ -65,7 +65,7 @@ def test_tempo_total_do_lote_vem_de_trama_batch_timeout_s_e_valor_ruim_volta_ao_
     ("isto não é JSON", False),
 ])
 def test_imagem_so_roda_laco_em_lote_se_tiver_o_rotulo_do_runner_novo(saida, esperado):
-    assert _tem_rotulo_de_lote(saida) is esperado
+    assert _tem_rotulo(saida, ROTULO_LOTE) is esperado
 
 
 def test_status_sem_o_rotulo_nao_promete_lote():

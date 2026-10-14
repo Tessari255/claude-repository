@@ -10,10 +10,14 @@ O conteúdo dinâmico só pode apontar para passos que **já rodaram** quando o 
 os irmãos anteriores, os irmãos anteriores dos contêineres que envolvem o passo, e as saídas "de dentro" do
 contêiner (o item do “Para cada”). Passos dentro de uma condição ou de um laço não ficam visíveis depois dele;
 os de um escopo ficam.
+
+Uma expressão Python de campo é conferida SÓ pelo texto (``ast.parse``): sintaxe, nomes e atributos. Nada dela é executado
+no processo da API; quem a avalia é o executor isolado, na hora de rodar o passo.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,7 +32,7 @@ from .blocks.builtin import (
     requer_sandbox,
 )
 from .config import Limites
-from .models import ID_GATILHO, BlockType, Campo, Flow, Issue, ParamDef, Passo, Ref
+from .models import ID_GATILHO, MAX_EXPRESSAO, BlockType, Campo, Flow, Issue, ParamDef, Passo, Ref
 from .passos import definicao_efetiva, percorrer, portas_declaradas, regras_declaradas
 from .tipos import ROTULOS_TIPO, rotulo_tipo, tipo_do_valor, tipos_compativeis, valor_e_do_tipo
 
@@ -133,14 +137,90 @@ def parametros_efetivos(tipo: BlockType, params: dict[str, Any]) -> dict[str, An
 
 # ---------------------------------------------------------------------------- campos
 def campo_vazio(campo: Campo | None, tipo: str) -> bool:
-    """O campo está "sem preenchimento"? Texto fixo vazio e nenhum conteúdo dinâmico contam como vazio."""
+    """O campo está "sem preenchimento"? Texto fixo vazio, nenhum conteúdo dinâmico e expressão em branco contam como vazio."""
     if campo is None:
         return True
+    if campo.expr is not None:
+        return campo.expr.strip() == ""
     if campo.dinamico:
         return not any(isinstance(p, Ref) or p != "" for p in campo.parts or [])
     if campo.value is None:
         return True
     return tipo == "texto" and isinstance(campo.value, str) and campo.value == ""
+
+
+# ---------------------------------------------------------------------------- expressões
+# Funções que uma expressão de campo pode chamar. O runner (executor/runner.py, EXPR_BUILTINS) avalia com exatamente estas.
+BUILTINS_SEGUROS = frozenset({
+    "abs", "all", "any", "bool", "dict", "divmod", "enumerate", "filter", "float", "int", "isinstance", "len", "list", "map",
+    "max", "min", "pow", "range", "reversed", "round", "set", "sorted", "str", "sum", "tuple", "zip",
+})
+_DICA_SINTAXE = "Confira parênteses, aspas e vírgulas perto da posição indicada."
+_DICA_GRANDE = "Divida o cálculo em mais de um passo ou use um passo “Executar código Python”."
+
+
+def _posicao(linha: int | None, coluna: int | None) -> str:
+    if not coluna:
+        return ""
+    return f" (linha {linha}, coluna {coluna})" if linha and linha > 1 else f" (coluna {coluna})"
+
+
+def _coluna(texto: str, no: ast.expr) -> int:
+    """A coluna (a partir de 1, em caracteres) de um nó: o ``col_offset`` do ast conta bytes UTF-8."""
+    linhas = texto.split("\n")
+    if not 1 <= no.lineno <= len(linhas):
+        return no.col_offset + 1
+    return len(linhas[no.lineno - 1].encode("utf-8")[: no.col_offset].decode("utf-8", "ignore")) + 1
+
+
+def problema_da_expressao(expr: str, variaveis: Any) -> tuple[str, str] | None:
+    """O primeiro problema da expressão (mensagem que completa “a expressão de X …” e dica), ou None.
+
+    Só lê o texto: ``ast.parse`` monta a árvore sem executar nada. Todo nome livre precisa ser uma das ``variaveis`` ou
+    uma função de ``BUILTINS_SEGUROS``; atributos com ``__`` são recusados."""
+    if len(expr) > MAX_EXPRESSAO:  # antes de analisar: o tamanho limita o custo do ast.parse
+        return f"é grande demais (máximo de {MAX_EXPRESSAO} caracteres).", _DICA_GRANDE
+    try:
+        arvore = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        return f"tem um erro de escrita (sintaxe){_posicao(e.lineno, e.offset)}: {e.msg}.", _DICA_SINTAXE
+    except ValueError:
+        return "tem um caractere que não é permitido (como o caractere nulo).", "Apague a expressão e digite-a de novo."
+    except (RecursionError, MemoryError):
+        return "é complexa demais para ser analisada.", _DICA_GRANDE
+    permitidos = BUILTINS_SEGUROS | set(variaveis)
+    problemas: list[tuple[int, int, str, str]] = []
+    # Percurso com pilha (e não recursão): a árvore de uma expressão pode ser funda. Cada nó leva os nomes que o envolvem
+    # (parâmetros de lambda e variáveis de compreensões), que não são livres.
+    pilha: list[tuple[ast.AST, frozenset[str]]] = [(arvore, frozenset())]
+    while pilha:
+        no, ligados = pilha.pop()
+        if isinstance(no, ast.Attribute) and no.attr.startswith("__"):
+            problemas.append((no.lineno, _coluna(expr, no), f"acessa “{no.attr}”, e atributos especiais (com __) não são permitidos",
+                              "Use só atributos e métodos comuns, como nome.strip() ou texto.upper()."))
+        if isinstance(no, ast.Name) and isinstance(no.ctx, ast.Load) and no.id not in ligados and no.id not in permitidos:
+            problemas.append((no.lineno, _coluna(expr, no), f"usa “{no.id}”, que não é uma variável dela nem uma função permitida",
+                              "Crie a variável pelo botão “Conteúdo dinâmico” do campo ou use uma das funções permitidas: "
+                              f"{', '.join(sorted(BUILTINS_SEGUROS))}."))
+        if isinstance(no, ast.Lambda):
+            a = no.args
+            nomes = {x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg) if x is not None}
+            pilha += [(d, ligados) for d in (*a.defaults, *a.kw_defaults) if d is not None]
+            pilha.append((no.body, ligados | nomes))
+        elif isinstance(no, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            dentro = ligados
+            for i, gerador in enumerate(no.generators):
+                pilha.append((gerador.iter, ligados if i == 0 else dentro))  # o primeiro iterável roda fora da compreensão
+                dentro = dentro | {n.id for n in ast.walk(gerador.target) if isinstance(n, ast.Name)}
+                pilha += [(gerador.target, dentro), *((c, dentro) for c in gerador.ifs)]
+            corpo = [no.key, no.value] if isinstance(no, ast.DictComp) else [no.elt]
+            pilha += [(c, dentro) for c in corpo]
+        else:
+            pilha += [(filho, ligados) for filho in ast.iter_child_nodes(no)]
+    if not problemas:
+        return None
+    linha, coluna, mensagem, dica = min(problemas)
+    return f"{mensagem}{_posicao(linha, coluna)}.", dica
 
 
 # ---------------------------------------------------------------------------- análise
@@ -191,12 +271,15 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
     tipos_entrada: dict[str, dict[str, str]] = {}
     variaveis: dict[str, str] = {}                # passo "inicializar variável" -> tipo
     nomes_de_variavel: dict[str, str] = {}
+    com_expressoes: set[str] = set()              # passos com expressão Python em algum campo: precisam do executor isolado
     saidas_vistas = False
 
     def nome(step_id: str) -> str:
         return nome_passo(passos[step_id], a.defs.get(step_id)) if step_id in passos else step_id
 
     def tipo_do_campo(c: Campo) -> str:
+        if c.expr is not None:
+            return "qualquer"  # o resultado é conferido contra o tipo do campo quando a expressão roda
         if c.dinamico:
             partes = c.parts or []
             if len(partes) == 1 and isinstance(partes[0], Ref):
@@ -240,6 +323,15 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
                 add(code="tipo_incompativel", step_id=p.id, field=field_id,
                     message=f"{nome(p.id)}: “{rotulo}” usa um campo interno de “{porta.label}”, mas esse conteúdo é "
                             f"{rotulo_tipo(tipos.get((ref.step, ref.output), 'qualquer'))}.")
+
+    def conferir_expressao(p: Passo, campo: Campo, field_id: str, rotulo: str) -> None:
+        if campo.expr is None or campo_vazio(campo, "qualquer"):
+            return
+        com_expressoes.add(p.id)
+        problema = problema_da_expressao(campo.expr, campo.refs or {})
+        if problema:
+            add(code="expressao_invalida", step_id=p.id, field=field_id,
+                message=f"{nome(p.id)}: a expressão de “{rotulo}” {problema[0]}", hint=problema[1])
 
     def conferir_tipo(p: Passo, campo: Campo, tipo_esperado: str, field_id: str, rotulo: str) -> None:
         obtido = tipo_do_campo(campo)
@@ -285,6 +377,7 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
             campo = p.inputs.get(porta.id)
             if campo is not None:
                 conferir_referencias(p, campo, porta.id, porta.label, visiveis, dentro_set)
+                conferir_expressao(p, campo, porta.id, porta.label)
             if campo_vazio(campo, esperado):
                 if porta.required and porta.default is None:
                     add(code="campo_obrigatorio", step_id=p.id, field=porta.id,
@@ -342,7 +435,7 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
         if p.settings.timeout_s is not None and limites is not None and p.settings.timeout_s > limites.tempo_s:
             add(code="tempo_limite_invalido", step_id=p.id, field="timeout_s",
                 message=f"{nome(p.id)}: o tempo limite do passo não pode passar de {limites.tempo_s:g} s (limite do servidor).")
-        if sandbox is not None and requer_sandbox(t, parametros_efetivos(t, p.params)) and not sandbox.disponivel:
+        if sandbox is not None and (requer_sandbox(t, parametros_efetivos(t, p.params)) or p.id in com_expressoes) and not sandbox.disponivel:
             add(code="executor_indisponivel", step_id=p.id,
                 message=(f"{nome(p.id)} executa código Python, mas o executor isolado não está disponível: "
                          f"{sandbox.mensagem or 'verifique a instalação do Docker'}"),
@@ -386,6 +479,7 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
                     message=f"{nome(p.id)}: o teste da {onde} não existe: {r.op}.")
                 continue
             conferir_referencias(p, r.esq, pd.id, f"Valor da {onde}", visiveis, dentro)
+            conferir_expressao(p, r.esq, pd.id, f"Valor da {onde}")
             if campo_vazio(r.esq, "texto"):
                 add(code="campo_obrigatorio", step_id=p.id, field=pd.id,
                     message=f"{nome(p.id)}: escolha o valor a testar na {onde}.",
@@ -398,11 +492,12 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
                         message=f"{nome(p.id)}: a {onde} espera um valor sim/não, mas recebe {rotulo_tipo(tipo_esq)}.",
                         hint="Use outro teste (ex.: “é igual a”) ou escolha um valor sim/não.")
                 continue
-            if r.dir is None:
+            if r.dir is None or (r.dir.expr is not None and campo_vazio(r.dir, "qualquer")):
                 add(code="campo_obrigatorio", step_id=p.id, field=pd.id,
                     message=f"{nome(p.id)}: preencha o valor de comparação da {onde}.")
                 continue
             conferir_referencias(p, r.dir, pd.id, f"Comparar com da {onde}", visiveis, dentro)
+            conferir_expressao(p, r.dir, pd.id, f"Comparar com ({onde})")
             if r.op in OPERADORES_DE_ORDEM and tipo_esq == "numero" and not r.dir.dinamico \
                     and isinstance(r.dir.value, str) and _parse_numero(r.dir.value) is None:
                 add(code="parametro_invalido", step_id=p.id, field=pd.id,

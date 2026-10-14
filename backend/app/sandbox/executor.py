@@ -23,6 +23,8 @@ Lote (``run_lote``): um laço cujo corpo é só um passo Python roda todas as it
 POR ITEM (tempo, memória, logs, tamanho do resultado) e um teto de tempo e de bytes para o lote. É um único trabalho, então a regra
 continua valendo; ele sempre usa um contêiner novo, nunca o do pool, porque o limite de CPU do ocioso é o de UM trabalho.
 
+Expressões de campo (``run_expr``): todas as de um passo vão em UM trabalho, pelo mesmo caminho de ``run`` (limites e pool).
+
 Se o Docker ou a imagem não estiverem disponíveis, ``status()`` informa o motivo e
 ``run()`` falha de forma explícita — nunca há execução sem isolamento como alternativa.
 """
@@ -44,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeGuard
 
 from ..config import Limites
+from ..tipos import validar_json_puro
 from .lote import AoItem, EntregaDoLote, LeitorDeLote, corpo_max_do_lote, tempo_do_lote
 from .pool import Aquecido, PoolAquecido
 
@@ -57,6 +60,7 @@ ROTULO_POOL = "trama.executor=pool"
 CHAVE_ROTULO = "trama.executor"
 PRONTO = b"PRONTO"
 ROTULO_LOTE = "trama.runner.lote"  # rótulo da imagem (executor/Dockerfile): o runner entende o modo `batch`
+ROTULO_EXPR = "trama.runner.expr"  # e este, o modo `expr` (expressões Python dos campos)
 PARTIDA_MAX_S = 30.0  # quanto esperar um contêiner do pool avisar que subiu
 
 # PID 1 de um contêiner do pool (constante nossa, sem dado do usuário). Espera a linha de partida do host
@@ -99,6 +103,7 @@ class ExecutorStatus:
     docker_versao: str | None = None
     # A imagem traz um runner que entende o modo lote. Uma imagem antiga funciona, só que sem o lote (cada item, um contêiner).
     lote: bool = False
+    expr: bool = False  # ... e que calcula expressões de campo; sem isso, as expressões são recusadas com um pedido de reconstruir
 
     def como_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +160,10 @@ def _trabalho(token: str, mode: str, code: str, inputs: dict | None, params: dic
     }
 
 
+def _erro_de_valor(mensagem: str) -> dict[str, Any]:
+    return {"type": "RetornoInvalido", "message": mensagem, "line": None, "column": None}
+
+
 def _serializar(trabalho: dict[str, Any]) -> bytes:
     return json.dumps(trabalho, ensure_ascii=True).encode("ascii")  # ASCII puro: sem surrogates nem separadores Unicode
 
@@ -165,12 +174,12 @@ def _grande_demais(limites: Limites) -> SandboxResult:
         f"Os dados enviados ao código são grandes demais (limite de {limites.valor_max * 4 // 1024} KB)."))
 
 
-def _tem_rotulo_de_lote(saida: str) -> bool:
+def _tem_rotulo(saida: str, rotulo: str) -> bool:
     try:
         rotulos = json.loads(saida)
     except ValueError:
         return False
-    return isinstance(rotulos, dict) and rotulos.get(ROTULO_LOTE) == "1"
+    return isinstance(rotulos, dict) and rotulos.get(rotulo) == "1"
 
 
 def _drenar(fluxo, destino: bytearray, teto: int, estourou: threading.Event) -> None:
@@ -257,7 +266,8 @@ class DockerExecutor:
             base.instrucao = "Rode `./scripts/build-executor.sh` (ou `make executor`) e recarregue a página."
             return base
         base.disponivel = True
-        base.lote = _tem_rotulo_de_lote(imagem.stdout)
+        base.lote = _tem_rotulo(imagem.stdout, ROTULO_LOTE)
+        base.expr = _tem_rotulo(imagem.stdout, ROTULO_EXPR)
         return base
 
     # ----------------------------------------------------------------- limpeza
@@ -363,6 +373,51 @@ class DockerExecutor:
                 return self._rodar(corpo, token, limites, nome)
             finally:
                 self._remover(nome)  # sem --rm: o contêiner precisa existir até lermos o motivo do encerramento
+
+    def run_expr(self, expressoes: list[dict[str, Any]], limits: Limites | None = None) -> SandboxResult:
+        """Avalia expressões de campo (``[{id, code, vars}]``) em UM trabalho, no modo ``expr`` do runner.
+
+        Com ``ok``, ``payload["items"]`` traz, na ordem pedida, ``{"id", "value"}`` ou ``{"id", "error"}`` (com ``type``,
+        ``message``, ``line`` e ``column``). A expressão roda no processo do runner e pode forjar a resposta: aqui só passam
+        os ids pedidos, valores JSON puros dentro do limite de tamanho e erros com campos conhecidos."""
+        limites = limits or self.limites
+        status = self.status()
+        if status.disponivel and not status.expr:
+            return SandboxResult(False, error=_erro(
+                "executor_indisponivel", f"A imagem do executor ({self.imagem}) é antiga e não calcula expressões.",
+                suggestion="Rode `./scripts/build-executor.sh` (ou `make executor`) e tente de novo."))
+        r = self.run("expr", "", items=expressoes, limits=limites)
+        if not r.ok:
+            return r
+        itens = (r.payload or {}).get("items")
+        if not isinstance(itens, list) or len(itens) != len(expressoes):
+            itens = []  # cai na recusa abaixo: falta (ou sobra) resposta
+        conferidos: list[dict[str, Any]] = []
+        for pedido, item in zip(expressoes, itens, strict=False):
+            if not isinstance(item, dict) or item.get("id") != pedido["id"] or ("value" in item) == ("error" in item):
+                break
+            if "error" in item:
+                bruto = item["error"] if isinstance(item["error"], dict) else {}
+                conferidos.append({"id": pedido["id"], "error": {
+                    "type": _texto(bruto.get("type"), 200), "message": limpar_segredos(_texto(bruto.get("message"), 2000)),
+                    "line": bruto.get("line") if _eh_int(bruto.get("line")) else None,
+                    "column": bruto.get("column") if _eh_int(bruto.get("column")) else None}})
+                continue
+            try:
+                validar_json_puro(item["value"])
+                grande = len(json.dumps(item["value"], ensure_ascii=False).encode("utf-8")) > limites.valor_max
+            except ValueError:
+                conferidos.append({"id": pedido["id"], "error": _erro_de_valor("O resultado não é um valor JSON válido.")})
+                continue
+            if grande:
+                conferidos.append({"id": pedido["id"], "error": _erro_de_valor(
+                    f"O resultado é grande demais (limite de {limites.valor_max // 1024} KB).")})
+                continue
+            conferidos.append({"id": pedido["id"], "value": item["value"]})
+        if len(conferidos) != len(expressoes):
+            return SandboxResult(False, logs=r.logs, duration_ms=r.duration_ms, error=_erro(
+                "erro_interno", "O executor devolveu um resultado em formato inesperado."))
+        return SandboxResult(True, payload={"items": conferidos}, logs=r.logs, duration_ms=r.duration_ms)
 
     # ------------------------------------------------------------------- lote
     def run_lote(self, code: str, itens: list[dict], params: dict | None = None, limits: Limites | None = None, *,

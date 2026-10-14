@@ -42,7 +42,27 @@ SUGESTOES = {
 
 # Falhas que repetir não resolve (configuração ou dados errados).
 NAO_REPETIR = frozenset({"entrada_invalida", "entrada_ausente", "executor_indisponivel", "conteudo_indisponivel",
-                         "parametro_invalido", "limite_itens", "registros_demais", "tipo_invalido"})
+                         "parametro_invalido", "limite_itens", "registros_demais", "tipo_invalido", "expressao_invalida"})
+
+
+def resumo_da_expressao(expr: str) -> str:
+    return expr if len(expr) <= 80 else expr[:79] + "…"
+
+
+def erro_da_expressao(rotulo: str, expr: str, err: dict[str, Any]) -> ErroBloco:
+    """O erro de uma expressão de campo (já conferido pelo executor), apontando o campo, a expressão e a posição."""
+    tipo = str(err.get("type") or "")
+    bruto = str(err.get("message") or "")
+    linha, coluna = err.get("line"), err.get("column")
+    if tipo == "RetornoInvalido":
+        motivo = bruto
+    else:
+        motivo = _AMIGAVEIS.get(tipo, f"O código gerou um erro do tipo {tipo or 'desconhecido'}.").replace("{m}", bruto)
+    onde = (f" na linha {linha}, coluna {coluna}" if linha and linha > 1 else f" na coluna {coluna}") if coluna else ""
+    return ErroBloco(f"A expressão do campo “{rotulo}” (`{resumo_da_expressao(expr)}`) falhou{onde}: {motivo[:1].lower()}{motivo[1:]}",
+                     codigo="expressao_invalida",
+                     sugestao="Confira a expressão e os valores que ela usa; os detalhes técnicos trazem a mensagem original do Python.",
+                     tecnico={"type": tipo, "message": bruto, "snippet": expr[:500]})
 
 
 def erro_da_sandbox(err: dict[str, Any], quando: str = "") -> ErroBloco:

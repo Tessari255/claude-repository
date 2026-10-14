@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .config import Limites
-from .dinamico import avaliar_regras, montar_entradas
+from .dinamico import Calculadas, avaliar_regras, montar_entradas
 from .errors import ErroBloco
 from .execucao import Execucao, Resultado, ResultadoLista
 from .historico import Historico
@@ -23,6 +23,7 @@ ESTADOS_ROTULO = {"concluido": "teve sucesso", "falhou": "falhou", "ignorado": "
 _QUANDO_RODA = {"sucesso": "tiver sucesso", "falhou": "falhar", "ignorado": "for ignorado", "expirou": "expirar"}
 
 ExecutarPasso = Callable[[Execucao, Passo, tuple[int, ...]], Resultado]
+CalcularExpressoes = Callable[..., Calculadas]  # PassosSimples.calcular_expressoes: as expressões de um passo, no executor
 
 
 def deve_rodar(p: Passo, anterior: Resultado) -> tuple[bool, str]:
@@ -47,11 +48,13 @@ def motivo_ignorado(p: Passo, anterior_nome: str, situacao: str) -> str:
 
 class Controle:
     def __init__(self, historico: Historico, limites: Limites, executar_passo: ExecutarPasso,
-                 lote: LoteDePython | None = None) -> None:
+                 lote: LoteDePython | None = None, *, calcular: CalcularExpressoes | None = None) -> None:
         self.historico = historico
         self.limites = limites
         self.executar_passo = executar_passo
         self.lote = lote
+        # Sem quem calcule, um campo com expressão falha como erro interno: nada é avaliado fora do executor isolado.
+        self.calcular: CalcularExpressoes = calcular or (lambda *_a, **_k: {})
         # Interruptor interno: False força o caminho de sempre (um passo, um contêiner, por iteração). Os testes de
         # equivalência rodam cada fluxo com os dois e comparam o histórico.
         self.usar_lote = True
@@ -99,23 +102,25 @@ class Controle:
         """Executa condição, para cada, repetir até ou escopo. Devolve (saídas, falhas não tratadas, logs)."""
         logs: list[dict[str, str]] = []
         params = parametros_efetivos(tipo, passo.params)
-        entradas = montar_entradas(ex, passo, tipo, self.limites)
+        # Repetir até testa a condição a cada repetição, com os valores de então: as regras dele são calculadas lá.
+        calculadas = self.calcular(ex, passo, tipo, regras=tipo.id == "builtin.condicao")
+        entradas = montar_entradas(ex, passo, tipo, self.limites, calculadas)
         self.historico.gravar_etapa(ex, passo.id, iteracao, inputs=entradas)
 
         if tipo.id == "builtin.condicao":
-            saidas, falhas = self._condicao(ex, passo, params, iteracao, logs)
+            saidas, falhas = self._condicao(ex, passo, params, iteracao, logs, calculadas)
         elif tipo.id == "builtin.escopo":
             saidas, falhas = self._escopo(ex, passo, iteracao)
         elif tipo.id == "builtin.para_cada":
             saidas, falhas = self._para_cada(ex, passo, params, entradas["lista"], iteracao, logs)
         else:
-            saidas, falhas = self._repetir_ate(ex, passo, params, iteracao)
+            saidas, falhas = self._repetir_ate(ex, passo, tipo, params, iteracao)
         return saidas, falhas, logs
 
     def _condicao(self, ex: Execucao, passo: Passo, params: dict[str, Any], iteracao: tuple[int, ...],
-                  logs: list[dict[str, str]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                  logs: list[dict[str, str]], calculadas: Calculadas) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         nome = ex.nomes.get(passo.id, passo.id)
-        r = avaliar_regras(ex, params, self.limites)
+        r = avaliar_regras(ex, params, self.limites, calculadas)
         logs.append({"source": "system", "text": f"Teste concluído: {'sim' if r else 'não'}. Seguindo por “{'Se sim' if r else 'Se não'}”."})
         escolhido, outro = ("sim", "nao") if r else ("nao", "sim")
         for f in passo.slots.get(outro, []):
@@ -169,7 +174,7 @@ class Controle:
     def _avisar_falha_do_item(logs: list[dict[str, str]], posicao: int, total: int) -> None:
         logs.append({"source": "system", "text": f"O item {posicao + 1} de {total} falhou; as repetições seguintes foram canceladas."})
 
-    def _repetir_ate(self, ex: Execucao, passo: Passo, params: dict[str, Any],
+    def _repetir_ate(self, ex: Execucao, passo: Passo, tipo: BlockType, params: dict[str, Any],
                      iteracao: tuple[int, ...]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         corpo = passo.slots.get("corpo", [])
         limite = int(params.get("limite", 10))
@@ -179,7 +184,7 @@ class Controle:
             ex.valores[passo.id] = {"indice": repeticoes}
             falhas = self.lista(ex, corpo, (*iteracao, repeticoes)).falhas
             repeticoes += 1
-            if falhas or avaliar_regras(ex, params, self.limites):
+            if falhas or avaliar_regras(ex, params, self.limites, self.calcular(ex, passo, tipo, entradas=False)):
                 break
             if repeticoes >= limite:
                 raise ErroBloco(f"A condição não ficou verdadeira em {limite} repetições.", codigo="limite_repeticoes",

@@ -8,8 +8,10 @@ Protocolo
 * stdin : um único JSON com o trabalho
           ``{token, mode, code, inputs, params, items, limits}``.
           ``mode`` é ``block`` (chama run), ``map`` (chama transformar em cada item),
-          ``check`` (carrega o código como na execução real e confere a função)
-          ou ``batch`` (chama run uma vez por elemento de ``items``, em ordem).
+          ``check`` (carrega o código como na execução real e confere a função),
+          ``batch`` (chama run uma vez por elemento de ``items``, em ordem)
+          ou ``expr`` (avalia as expressões de campo de ``items``, ``[{id, code, vars}]``,
+          e devolve ``{"items": [{id, value} | {id, error}]}`` na mesma ordem).
 * stdout: texto livre do código do usuário que escape da captura (ex.: escrita
           direta no descritor 1) e, na última linha, a resposta do runner no
           formato  ``<PREFIXO><token><json>``.  O token é aleatório por execução
@@ -51,6 +53,14 @@ import traceback
 
 PREFIXO = "\x1e@@TRAMA@@"
 ARQUIVO = "<bloco>"
+EXPRESSAO = "<expressão>"
+
+# As únicas funções que uma expressão de campo enxerga. A API (validation.BUILTINS_SEGUROS) só aceita expressões que usem
+# estas; um teste confere que as duas listas são iguais.
+EXPR_BUILTINS = (
+    "abs", "all", "any", "bool", "dict", "divmod", "enumerate", "filter", "float", "int", "isinstance", "len", "list", "map",
+    "max", "min", "pow", "range", "reversed", "round", "set", "sorted", "str", "sum", "tuple", "zip",
+)
 
 # Bibliotecas padrão liberadas para o código do usuário. Nada além da biblioteca
 # padrão está instalado na imagem.
@@ -273,9 +283,46 @@ def _carregar(codigo, nome, compilar=None):
     return funcao
 
 
+def _erro_da_expressao(exc, codigo):
+    """Tipo, mensagem e posição (linha e coluna, a partir de 1, em caracteres) do erro de uma expressão."""
+    linha = coluna = None
+    if isinstance(exc, SyntaxError):
+        linha, coluna = exc.lineno, exc.offset
+    else:
+        quadros = [q for q in traceback.extract_tb(exc.__traceback__) if q.filename == EXPRESSAO]
+        if quadros:
+            linha, deslocamento = quadros[-1].lineno, quadros[-1].colno
+            linhas = codigo.split("\n")
+            if deslocamento is not None and linha and 1 <= linha <= len(linhas):  # colno conta bytes UTF-8
+                coluna = len(linhas[linha - 1].encode("utf-8")[:deslocamento].decode("utf-8", "ignore")) + 1
+    return {"type": type(exc).__name__, "message": str(exc)[:2000], "line": linha, "column": coluna}
+
+
+def _avaliar_expressao(item, seguros):
+    """Avalia UMA expressão com as variáveis dela, como globais (assim compreensões e lambdas também as enxergam)."""
+    codigo = item.get("code", "")
+    try:
+        valor = eval(compile(codigo, EXPRESSAO, "eval"), {**item.get("vars", {}), "__builtins__": seguros})
+        achado = _achar_nao_serializavel(valor, "resultado")
+    except MemoryError:
+        raise
+    except Exception as exc:
+        return {"id": item.get("id"), "error": _erro_da_expressao(exc, codigo)}
+    if achado:
+        return {"id": item.get("id"), "error": {
+            "type": "RetornoInvalido", "line": None, "column": None,
+            "message": "O resultado precisa ser um valor JSON (texto, número, booleano, lista, dicionário ou None; "
+                       "use list(...) para sequências). Problema em %s: %s." % achado}}
+    return {"id": item.get("id"), "value": valor}
+
+
 def _executar(trabalho, codigo, limites, linhas, compilar=None):
     """Executa o código do usuário e devolve o payload (dict) ou levanta uma exceção."""
     modo = trabalho.get("mode", "block")
+    if modo == "expr":
+        seguros = {nome: getattr(builtins, nome) for nome in EXPR_BUILTINS}
+        payload = {"items": [_avaliar_expressao(item, seguros) for item in trabalho.get("items", [])]}
+        return json.loads(_serializar(payload, int(limites.get("result_max", 1024 * 1024))))
     funcao = _carregar(codigo, "transformar" if modo == "map" else "run", compilar)
     if modo == "check":
         if not _aceita_dois(funcao):

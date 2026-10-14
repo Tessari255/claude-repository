@@ -29,7 +29,8 @@ class Despacho:
         self.historico = historico
         self.limites = limites
         self.simples = PassosSimples(historico, executor, limites)
-        self.controle = Controle(historico, limites, self.passo, LoteDePython(self.simples, historico, limites))
+        self.controle = Controle(historico, limites, self.passo, LoteDePython(self.simples, historico, limites),
+                                 calcular=self.simples.calcular_expressoes)
 
     def passo(self, ex: Execucao, passo: Passo, iteracao: tuple[int, ...]) -> Resultado:
         tipo = ex.defs[f"{passo.type}@{passo.version}"]

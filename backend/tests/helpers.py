@@ -26,6 +26,11 @@ def lit(valor: Any) -> dict[str, Any]:
     return {"value": valor}
 
 
+def expr(codigo: str, **variaveis: tuple[str, str]) -> dict[str, Any]:
+    """Campo com expressão Python: ``expr("len(itens) * 2", itens=("gatilho", "itens"))``."""
+    return {"expr": codigo, "refs": {k: {"step": s, "output": o, "path": ""} for k, (s, o) in variaveis.items()}}
+
+
 def tpl(*partes: Any) -> dict[str, Any]:
     """Campo com texto + conteúdo dinâmico: ``tpl("Olá, ", ("gatilho", "nome"), "!")``."""
     return {"parts": [p if isinstance(p, str) else {"step": p[0], "output": p[1], "path": ""} for p in partes]}

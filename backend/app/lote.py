@@ -109,6 +109,8 @@ class LoteDePython:
             return None
         if passo.settings.retry.count or passo.settings.timeout_s is not None or passo.run_after != ["sucesso"]:
             return None
+        if any(c.expr is not None for c in passo.inputs.values()):
+            return None  # cada iteração precisaria calcular as expressões no executor antes: segue o caminho de sempre
         return passo, tipo
 
     def _entradas(self, ex: Execucao, laco: Passo, passo: Passo, tipo: BlockType, itens: list) -> list[dict[str, Any]] | None:

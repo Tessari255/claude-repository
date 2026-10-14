@@ -11,6 +11,7 @@ domínio e mensagens são em português.
 
 from __future__ import annotations
 
+import keyword
 import re
 from typing import Any, Literal
 
@@ -30,6 +31,7 @@ ExecutarApos = Literal["sucesso", "falhou", "ignorado", "expirou"]
 RE_ID_PORTA = re.compile(r"^[a-z_][a-z0-9_]{0,39}$")
 RE_ID_PASSO = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 RE_ID_TIPO = re.compile(r"^(builtin|custom)\.[a-z0-9_\-]{1,48}$")
+RE_VARIAVEL = re.compile(r"^[a-z][a-z0-9_]{0,39}$")  # variável de expressão: identificador Python simples, sem _ no começo
 
 ID_GATILHO = "gatilho"
 MAX_PASSOS = 200
@@ -37,6 +39,8 @@ MAX_PROFUNDIDADE = 8
 MAX_CODIGO = 64 * 1024
 MAX_VERSAO = 1_000_000
 MAX_PARTES = 60
+MAX_EXPRESSAO = 2000  # caracteres de uma expressão Python de campo
+MAX_VARIAVEIS = 20    # variáveis (conteúdos dinâmicos) de uma expressão
 MAX_TENTATIVAS = 5
 
 
@@ -238,29 +242,45 @@ class Ref(Estrito):
 
 
 class Campo(Estrito):
-    """O valor de uma entrada: ``{"value": X}`` (valor fixo) ou ``{"parts": [...]}`` (conteúdo dinâmico).
+    """O valor de uma entrada: ``{"value": X}`` (valor fixo), ``{"parts": [...]}`` (conteúdo dinâmico) ou
+    ``{"expr": "len(itens) * 2", "refs": {"itens": Ref}}`` (expressão Python).
 
     Em ``parts``, textos soltos e referências se alternam, como os “chips” do Power Automate. Uma única
     referência preserva o tipo do dado; qualquer outra combinação vira um texto.
+
+    A expressão é só texto aqui: o verificador a confere sem executá-la e o motor a avalia SOMENTE no executor isolado.
+    Cada variável dela (``refs``) é um conteúdo dinâmico. Versões da Trama anteriores às expressões não abrem fluxos que as usam.
     """
 
     value: Any = None
     parts: list[str | Ref] | None = Field(default=None, max_length=MAX_PARTES)
+    expr: str | None = Field(default=None, max_length=MAX_EXPRESSAO)
+    refs: dict[str, Ref] | None = Field(default=None, max_length=MAX_VARIAVEIS)
 
     @model_validator(mode="after")
-    def _um_dos_dois(self) -> Campo:
+    def _um_so(self) -> Campo:
         tem_valor = "value" in self.model_fields_set
-        if tem_valor == (self.parts is not None):
-            raise ValueError("informe um valor fixo (value) ou conteúdo dinâmico (parts), e não os dois")
+        if tem_valor + (self.parts is not None) + (self.expr is not None) != 1:
+            raise ValueError("informe um valor fixo (value), conteúdo dinâmico (parts) ou uma expressão (expr): um deles, e só um")
+        if self.refs is not None and self.expr is None:
+            raise ValueError("as variáveis (refs) só valem junto com uma expressão (expr)")
+        for nome in self.refs or {}:
+            if not RE_VARIAVEL.match(nome) or keyword.iskeyword(nome):
+                raise ValueError(f"nome de variável inválido na expressão: {nome!r} (use letras minúsculas, números e _, começando por letra)")
         try:
-            validar_json_puro(self.value if tem_valor else [p for p in (self.parts or []) if isinstance(p, str)])
+            if tem_valor:
+                validar_json_puro(self.value)
+            else:
+                validar_json_puro(self.expr if self.expr is not None else [p for p in (self.parts or []) if isinstance(p, str)])
         except ValueError as e:
             raise ValueError(f"valor inválido: {e}") from None
         return self
 
     @model_serializer(mode="plain")
     def _serializar(self) -> dict[str, Any]:
-        """Só a chave ativa: ``{"value": X}`` ou ``{"parts": [...]}`` (nunca as duas, para o dado reler igual)."""
+        """Só a chave ativa (``value``, ``parts`` ou ``expr`` com ``refs``), para o dado reler igual."""
+        if self.expr is not None:
+            return {"expr": self.expr, "refs": {k: r.model_dump() for k, r in (self.refs or {}).items()}}
         if self.parts is not None:
             return {"parts": [p if isinstance(p, str) else p.model_dump() for p in self.parts]}
         return {"value": self.value}
@@ -270,7 +290,8 @@ class Campo(Estrito):
         return self.parts is not None
 
     def referencias(self) -> list[Ref]:
-        return [p for p in (self.parts or []) if isinstance(p, Ref)]
+        """Todo conteúdo dinâmico que o campo lê: as referências entre os textos ou as variáveis da expressão."""
+        return [p for p in (self.parts or []) if isinstance(p, Ref)] + list((self.refs or {}).values())
 
 
 class Regra(Estrito):

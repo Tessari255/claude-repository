@@ -2,7 +2,7 @@
 
 Blocos internos rodam aqui (código nosso); código do usuário roda SOMENTE no executor isolado. A resposta do
 executor é tratada como não confiável: antes de virar saída ela é conferida contra o contrato declarado do bloco
-(chaves, tipos, JSON puro e tamanho).
+(chaves, tipos, JSON puro e tamanho). O mesmo vale para as expressões Python dos campos, calculadas lá antes do passo rodar.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from typing import Any
 
 from .blocks.builtin import HANDLERS, ContextoBloco, requer_sandbox, valor_padrao_do_tipo
 from .config import Limites
-from .dinamico import montar_entradas
+from .dinamico import Calculadas, expressoes_do_passo, montar_entradas, valor_da_ref
 from .errors import ErroBloco
-from .erros_sandbox import NAO_REPETIR, SUGESTOES, erro_da_sandbox
+from .erros_sandbox import NAO_REPETIR, SUGESTOES, erro_da_expressao, erro_da_sandbox
 from .execucao import Cancelado, Encerrado, Execucao
 from .historico import Historico
 from .models import BlockType, Passo
@@ -33,7 +33,8 @@ class PassosSimples:
 
     def executar_folha(self, ex: Execucao, passo: Passo, tipo: BlockType, iteracao: tuple[int, ...], ctx: ContextoBloco) -> dict[str, Any]:
         ef = definicao_efetiva(tipo, passo.params)
-        entradas = montar_entradas(ex, passo, ef, self.limites)
+        # antes das tentativas: um erro de expressão é de configuração ou de dados, e repetir não o resolve
+        entradas = montar_entradas(ex, passo, ef, self.limites, self.calcular_expressoes(ex, passo, tipo))
         self.historico.gravar_etapa(ex, passo.id, iteracao, inputs=entradas)
         params = parametros_efetivos(tipo, passo.params)
         tentativas = 1 + passo.settings.retry.count
@@ -98,6 +99,31 @@ class PassosSimples:
             bruto = HANDLERS[tipo.id](entradas, params, ctx)
         tipos_saida = ex.port_types.get(passo.id, {}).get("outputs", {})
         return self._validar_saidas(ef, bruto, tipos_saida)
+
+    def calcular_expressoes(self, ex: Execucao, passo: Passo, tipo: BlockType, *, entradas: bool = True,
+                            regras: bool = True) -> Calculadas:
+        """Calcula no executor isolado, em UM trabalho, as expressões Python dos campos do passo (das entradas e, se pedido,
+        dos dois lados das regras) e devolve o valor de cada uma pela chave do campo. Sem expressões, nem chama o executor.
+
+        As variáveis de cada expressão são os valores do conteúdo dinâmico (só leitura). A resposta já chega conferida pelo
+        executor (ids, JSON puro, tamanho); o tipo do resultado é conferido depois, contra o tipo do campo."""
+        achadas = expressoes_do_passo(passo, tipo, entradas=entradas, regras=regras)
+        if not achadas:
+            return {}
+        pedido = [{"id": chave, "code": campo.expr, "vars": {nome: valor_da_ref(ex, r) for nome, r in (campo.refs or {}).items()}}
+                  for chave, _, campo in achadas]
+        ex.checar_cancelamento()
+        r = self.executor.run_expr(pedido)
+        if not r.ok:
+            e = erro_da_sandbox(r.error or {})
+            raise ErroBloco(f"Ao calcular as expressões do passo: {e.mensagem[:1].lower()}{e.mensagem[1:]}", codigo=e.codigo,
+                            sugestao=e.sugestao, tecnico=e.tecnico)
+        valores: Calculadas = {}
+        for (chave, rotulo, campo), item in zip(achadas, (r.payload or {})["items"], strict=True):
+            if "error" in item:
+                raise erro_da_expressao(rotulo, campo.expr or "", item["error"])
+            valores[chave] = item["value"]
+        return valores
 
     def lote_disponivel(self) -> bool:
         """O executor isolado está de pé e roda um laço inteiro em um contêiner só?"""
