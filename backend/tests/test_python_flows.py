@@ -304,3 +304,7 @@ def test_modelos_com_python_produzem_os_resultados_documentados(com_docker):
     laco = rodar("06-laco-e-variavel.json")
     assert valores(laco) == {"Soma": 60, "Média": 20}
     assert sorted(repeticoes(laco, "somar")) == [(0,), (1,), (2,)]
+    expressoes = rodar("07-expressoes.json")
+    assert valores(expressoes) == {"Saudação": "Olá, Ana Souza!", "Média": 18, "Acima da média": [23, 42]}
+    assert etapas(expressoes)["formatar"]["inputs"] == {"entrada": "Ana Souza"}  # o histórico guarda o valor calculado
+    assert valores(rodar("07-expressoes.json", {"numeros": []})) == {"Saudação": "Olá, Ana Souza!", "Média": "sem números"}

@@ -303,7 +303,8 @@ def test_importacao_nao_confia_no_formato_do_arquivo(client):
 # ------------------------------------------------------------------------------ modelos
 def test_modelos_listam_os_exemplos_prontos_para_importar(client):
     modelos = client.get("/api/modelos").json()
-    assert [m["id"] for m in modelos] == ["01-saudacao", "02-soma", "03-condicao", "04-lista", "05-tratar-erros", "06-laco-e-variavel"]
+    assert [m["id"] for m in modelos] == ["01-saudacao", "02-soma", "03-condicao", "04-lista", "05-tratar-erros", "06-laco-e-variavel",
+                                          "07-expressoes"]
     soma = next(m for m in modelos if m["id"] == "02-soma")
     assert soma["name"].startswith("Exemplo 2") and soma["step_count"] == 2 and soma["description"]
     r = client.post("/api/projetos/importar", json=soma["file"])  # o arquivo do modelo é o mesmo formato da importação
@@ -406,7 +407,7 @@ def test_sem_executor_a_dependencia_e_informada_e_o_python_fica_desabilitado(cli
 def test_modelos_sao_criados_na_primeira_execucao_e_produzem_os_resultados_documentados(settings, executor):
     with cliente(dataclasses.replace(settings, semear_exemplos=True), executor) as c:
         projetos = {p["name"].split(" — ")[0]: p for p in c.get("/api/projetos").json()}
-        assert len(projetos) == 6
+        assert len(projetos) == 7
         resultados = {}
         for nome, p in projetos.items():
             run = aguardar(c, c.post(f"/api/projetos/{p['id']}/execucoes", json={}).json()["id"])
@@ -419,5 +420,6 @@ def test_modelos_sao_criados_na_primeira_execucao_e_produzem_os_resultados_docum
     assert resultados["Exemplo 4"][0] == {"Lista transformada": [30, 60, 90]}
     assert resultados["Exemplo 5"][0]["Aviso"].startswith("Não foi possível calcular") and resultados["Exemplo 5"][1]["tentar"]["state"] == "falhou"
     assert resultados["Exemplo 6"][0] == {"Soma": 60, "Média": 20}
+    assert resultados["Exemplo 7"][0] == {"Saudação": "Olá, Ana Souza!", "Média": 18, "Acima da média": [23, 42]}
     with cliente(dataclasses.replace(settings, semear_exemplos=True), executor) as c:  # não duplica ao reiniciar
-        assert len(c.get("/api/projetos").json()) == 6
+        assert len(c.get("/api/projetos").json()) == 7

@@ -45,7 +45,7 @@ def test_fluxo_correto_nao_tem_problemas():
 
 
 @pytest.mark.parametrize("arquivo", ["01-saudacao.json", "02-soma.json", "03-condicao.json", "04-lista.json",
-                                     "05-tratar-erros.json", "06-laco-e-variavel.json"])
+                                     "05-tratar-erros.json", "06-laco-e-variavel.json", "07-expressoes.json"])
 def test_os_modelos_entregues_sao_validos(arquivo):
     a = analisar_dict(carregar_exemplo(arquivo)["flow"])
     assert a.erros == [], [i.message for i in a.issues]
