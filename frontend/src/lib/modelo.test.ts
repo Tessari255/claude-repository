@@ -69,6 +69,7 @@ describe('campos com expressão Python', () => {
     expect(nomeDeVariavel('For', [])).toBe('for_2')
     expect(nomeDeVariavel('Lambda', [])).toBe('lambda_2')
     expect(nomeDeVariavel('Nome', ['nome', 'nome_2'])).toBe('nome_3')
+    expect(nomeDeVariavel('Máx', [])).toBe('max_2')  // uma variável `max` esconderia a função max()
     const longo = nomeDeVariavel('x'.repeat(60), ['x'.repeat(40)])
     expect(longo).toMatch(/^[a-z][a-z0-9_]{0,39}$/)
     expect(longo.endsWith('_2')).toBe(true)
@@ -85,6 +86,7 @@ describe('campos com expressão Python', () => {
     expect(c.campo).toEqual({ expr: 'nomenome', refs: { nome } })
     // o nome novo não colide com o que já está escrito (aqui, a função sum)
     expect(inserirVariavel({ expr: 'sum()', refs: {} }, n, 'Sum', 4, 4).campo.expr).toBe('sum(sum_2)')
+    expect(inserirVariavel(vazio, n, 'Sum', 0, 0).campo.expr).toBe('sum_2')  // e nem com a função escrita depois
     // substitui a seleção
     expect(inserirVariavel({ expr: 'XX + 1', refs: {} }, n, 'n', 0, 2).campo.expr).toBe('n + 1')
   })
@@ -93,6 +95,7 @@ describe('campos com expressão Python', () => {
     expect(campoVazio({ expr: '  ', refs: {} }, 'numero')).toBe(true)
     expect(campoVazio({ expr: '1', refs: {} }, 'texto')).toBe(false)
     expect(referenciasDe({ expr: 'nome', refs: { nome } })).toEqual([nome])
+    expect(referenciasDe({ expr: '1 + 1', refs: { nome } })).toEqual([])  // a variável que saiu do texto não é lida
     expect(descreverCampo({ expr: 'len(nome) * 2', refs: { nome } }, () => 'x')).toBe('ƒ len(nome) * 2')
     expect(partesDe({ expr: 'nome', refs: { nome } })).toEqual([])
   })
@@ -114,6 +117,7 @@ describe('campos com expressão Python', () => {
     const r = renomearSaida(f, 'gatilho', 'n', 'numero')
     expect(achar(r, 'b')!.passo.inputs.entrada).toEqual({ expr: 'x + y', refs: { x: { step: 'a', output: 'resultado', path: '' }, y: { ...n, output: 'numero' } } })
     expect(usaOPasso(f, 'a')).toBe(true)
+    expect(usaOPasso(fluxo([p('a'), p('b', 'compor', { inputs: { entrada: { expr: '2 + 1', refs: { x: { step: 'a', output: 'resultado', path: '' } } } } })]), 'a')).toBe(false)
     const d = duplicar(fluxo([p('a', 'escopo', { slots: { corpo: [p('a1'), p('a2', 'compor', { inputs: { entrada: { expr: 'v', refs: { v: { step: 'a1', output: 'resultado', path: '' } } } } })] } })]), 'a')
     const copia = achar(d.flow, d.novoId!)!.passo
     const [c1, c2] = copia.slots!.corpo

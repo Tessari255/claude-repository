@@ -409,12 +409,16 @@ export function CampoDinamicoField({
           <p id={idExpressao} className="campo-ajuda">{AJUDA_EXPRESSAO}</p>
           {Object.keys(expressao.refs).length > 0 && (
             <ul className="variaveis-expressao" aria-label={`Variáveis da expressão de ${rotulo}`}>
-              {Object.entries(expressao.refs).map(([nome, r]) => (
-                <li key={nome}>
-                  <code>{nome}</code> = <span className={`chip-dinamico${fonte.descrever(r).valido ? '' : ' chip-invalido'}`}>{rotuloDaRef(fonte, r)}</span>
-                  {!nomesNaExpressao(expressao.expr).has(nome) && <span className="campo-ajuda"> (não usada: sai ao salvar)</span>}
-                </li>
-              ))}
+              {Object.entries(expressao.refs).map(([nome, r]) => {
+                const d = fonte.descrever(r)
+                return (
+                  <li key={nome}>
+                    <code>{nome}</code> = <span className={`chip-dinamico${d.valido ? '' : ' chip-invalido'}`}>{rotuloDaRef(fonte, r)}</span>
+                    {d.valido && <span className="campo-ajuda"> do passo “{d.passo}”</span>}
+                    {!nomesNaExpressao(expressao.expr).has(nome) && <span className="campo-ajuda"> (não usada: é ignorada)</span>}
+                  </li>
+                )
+              })}
             </ul>
           )}
         </>

@@ -351,6 +351,7 @@ button.chip-dinamico:hover { background: #cddcf3; }
 .acoes-campo { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 .btn-dinamico { background: #eef3fb; border-color: var(--anil); color: var(--anil); }
 .btn-expressao[aria-pressed='true'] { background: var(--tinta); border-color: var(--tinta); color: #f7f2e8; }
+.btn-expressao[aria-pressed='true']:hover:not(:disabled) { background: var(--tinta-2); border-color: var(--tinta-2); }
 .icone-expressao { font-family: var(--fonte-mono); font-weight: 700; font-style: italic; }
 .campo-expressao { font-family: var(--fonte-mono); font-size: 13px; resize: vertical; }
 .variaveis-expressao { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; font-size: 13px; }

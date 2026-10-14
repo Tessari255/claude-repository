@@ -26,12 +26,6 @@ describe('rascunho versus salvo', () => {
     expect(corpo).toEqual({ name: 'Novo nome', flow, base_revision: 7 })
   })
 
-  it('as variáveis que saíram do texto de uma expressão não vão para o servidor', () => {
-    const ref = { step: 'gatilho', output: 'x', path: '' }
-    const comExpressao = { ...flow, steps: [{ id: 'c', type: 'compor', version: 1, params: {}, inputs: { entrada: { expr: '1 + 1', refs: { x: ref } } } }] } as Flow
-    expect(corpoDoSalvamento({ name: 'Salvo', revision: 1 }, 'n', comExpressao).flow.steps[0].inputs.entrada).toEqual({ expr: '1 + 1', refs: {} })
-  })
-
   it('nome em branco mantém o nome já salvo', () => {
     expect(corpoDoSalvamento({ name: 'Salvo', revision: 1 }, '   ', flow).name).toBe('Salvo')
   })

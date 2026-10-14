@@ -113,9 +113,10 @@ export function PainelPasso({
   function mudarParametro(p: ParamDef, valor: unknown, novaEtapa?: boolean) {
     atualizar((x) => {
       const params = { ...x.params, [p.id]: valor }
-      // entradas cujo tipo depende deste parâmetro (ex.: valor inicial da variável) voltam ao padrão do novo tipo
+      // valores fixos das entradas cujo tipo depende deste parâmetro (ex.: valor inicial da variável) voltam ao padrão do novo tipo;
+      // conteúdo dinâmico e expressão ficam, porque só são conferidos contra o tipo depois
       const inputs = { ...x.inputs }
-      for (const porta of def!.inputs) if (porta.type_from?.param === p.id && inputs[porta.id] && !('parts' in inputs[porta.id])) delete inputs[porta.id]
+      for (const porta of def!.inputs) if (porta.type_from?.param === p.id && inputs[porta.id] && 'value' in inputs[porta.id]) delete inputs[porta.id]
       return { ...x, params, inputs }
     }, novaEtapa ? undefined : `param:${passo.id}:${p.id}`)
   }
@@ -149,7 +150,7 @@ export function PainelPasso({
     const valor = completos[p.id]
     if (p.type === 'regras') {
       return (
-        <RegrasEditor key={p.id} regras={regrasDoParametro(valor)} combinador={String(completos.combinador ?? 'e')} def={p} fonte={fonte}
+        <RegrasEditor key={`${passo.id}-${p.id}`} regras={regrasDoParametro(valor)} combinador={String(completos.combinador ?? 'e')} def={p} fonte={fonte}
           erro={erroDe(p.id)} desabilitado={somenteLeitura}
           onRegras={(r: Regra[], novaEtapa?: boolean) => mudarParametro(p, r, novaEtapa)}
           onCombinador={(c) => mudarParametro(def!.params.find((x) => x.id === 'combinador')!, c)} />
@@ -195,7 +196,7 @@ export function PainelPasso({
     const obrigatoria = porta.required && (porta.default === undefined || porta.default === null)
     return (
       <CampoDinamicoField
-        key={porta.id} rotulo={porta.label} tipo={tipo} campo={passo.inputs[porta.id]} fonte={fonte} obrigatorio={obrigatoria}
+        key={`${passo.id}-${porta.id}`} rotulo={porta.label} tipo={tipo} campo={passo.inputs[porta.id]} fonte={fonte} obrigatorio={obrigatoria}
         ajuda={porta.description || undefined} erro={erroDe(porta.id)} desabilitado={somenteLeitura}
         multilinha={tipo === 'texto' && /mensagem|texto/i.test(porta.id) && def.id === 'builtin.encerrar'}
         onChange={(c, novaEtapa) => mudarCampo(porta.id, c, novaEtapa)}
@@ -282,9 +283,9 @@ export function PainelPasso({
             )}
             {def.id === 'builtin.para_cada' && (
               <Aviso tipo="info" titulo="Python dentro do laço">
-                Se dentro do laço houver <strong>só um passo de código Python</strong>, sem novas tentativas nem tempo limite próprio, a Trama roda todos os itens
-                de uma vez, em um único contêiner isolado, bem mais rápido. Cada item continua com a sua linha no histórico. Com outros passos junto, ou com
-                tentativas ou tempo limite no passo, cada item roda separado.
+                Se dentro do laço houver <strong>só um passo de código Python</strong>, sem novas tentativas, sem tempo limite próprio e sem entradas em
+                modo <strong>ƒ Expressão</strong>, a Trama roda todos os itens de uma vez, em um único contêiner isolado, bem mais rápido. Cada item continua
+                com a sua linha no histórico. Com outros passos junto, ou com tentativas, tempo limite ou uma expressão numa entrada do passo, cada item roda separado.
               </Aviso>
             )}
             {campos}

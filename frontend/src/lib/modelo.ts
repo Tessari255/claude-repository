@@ -71,9 +71,12 @@ export function referenciaUnica(c: Campo | undefined | null): Ref | null {
   return typeof p === 'string' ? null : p
 }
 
-/** Todo conteúdo dinâmico que o campo lê: as referências entre os textos ou as variáveis da expressão. */
+/** Todo conteúdo dinâmico que o campo lê: as referências entre os textos ou as variáveis que aparecem no texto da expressão. */
 export function referenciasDe(c: Campo | undefined | null): Ref[] {
-  if (ehExpressao(c)) return Object.values(c.refs)
+  if (ehExpressao(c)) {
+    const usados = nomesNaExpressao(c.expr)
+    return Object.entries(c.refs).filter(([nome]) => usados.has(nome)).map(([, r]) => r)
+  }
   return ehDinamico(c) ? c.parts.filter((p): p is Ref => typeof p !== 'string') : []
 }
 
@@ -88,10 +91,13 @@ export function campoVazio(c: Campo | undefined | null, tipo: string): boolean {
 }
 
 // ------------------------------------------------------------------ expressões Python
-// Palavras reservadas do Python: não servem como nome de variável (o servidor recusa).
+// Palavras reservadas do Python (o servidor recusa) e as funções que a expressão pode chamar (validation.BUILTINS_SEGUROS):
+// uma variável com o nome de uma delas esconderia a função.
 const RESERVADAS = new Set(['and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
   'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try',
-  'while', 'with', 'yield'])
+  'while', 'with', 'yield',
+  'abs', 'all', 'any', 'bool', 'dict', 'divmod', 'enumerate', 'filter', 'float', 'int', 'isinstance', 'len', 'list', 'map', 'max', 'min',
+  'pow', 'range', 'reversed', 'round', 'set', 'sorted', 'str', 'sum', 'tuple', 'zip'])
 
 /** Nome de variável para uma saída (“Números da lista” → `numeros_da_lista`): snake_case ASCII, começando por letra, até 40 caracteres, sem repetir `usados`. */
 export function nomeDeVariavel(rotulo: string, usados: Iterable<string>): string {

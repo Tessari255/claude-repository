@@ -1,3 +1,4 @@
+import { semVariaveisOrfas } from './lib/modelo'
 import type {
   BlockDraft, BlockType, Flow, Issue, Modelo, PortTypes, Project, ProjectSummary, Run, StepError, SystemInfo,
 } from './types'
@@ -41,6 +42,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return dados as T
 }
 
+// Todo fluxo vai ao servidor sem as variáveis que saíram do texto de uma expressão: o servidor confere e resolve todas,
+// e o rascunho as guarda só para o nome voltar a valer se for redigitado.
 export const api = {
   sistema: () => request<SystemInfo>('GET', '/sistema'),
   blocos: () => request<BlockType[]>('GET', '/blocos'),
@@ -61,19 +64,19 @@ export const api = {
   projeto: (id: string) => request<Project>('GET', `/projetos/${id}`),
   criarProjeto: (name: string, description = '') => request<Project>('POST', '/projetos', { name, description }),
   salvarProjeto: (id: string, corpo: { name?: string; description?: string; flow?: Flow; base_revision?: number }) =>
-    request<Project>('PUT', `/projetos/${id}`, corpo),
+    request<Project>('PUT', `/projetos/${id}`, corpo.flow ? { ...corpo, flow: semVariaveisOrfas(corpo.flow) } : corpo),
   excluirProjeto: (id: string) => request<void>('DELETE', `/projetos/${id}`),
   importarProjeto: (conteudo: unknown) =>
     request<Project & { warnings: string[]; created_blocks: string[] }>('POST', '/projetos/importar', conteudo),
   exportarFluxo: (name: string, description: string, flow: Flow) =>
-    request<unknown>('POST', '/fluxos/exportar', { name, description, flow }),
+    request<unknown>('POST', '/fluxos/exportar', { name, description, flow: semVariaveisOrfas(flow) }),
 
   validar: (flow: Flow) =>
-    request<{ valid: boolean; issues: Issue[]; port_types: PortTypes }>('POST', '/fluxos/validar', { flow }),
+    request<{ valid: boolean; issues: Issue[]; port_types: PortTypes }>('POST', '/fluxos/validar', { flow: semVariaveisOrfas(flow) }),
   modelos: () => request<Modelo[]>('GET', '/modelos'),
 
   executar: (projectId: string, flow: Flow, trigger_inputs?: Record<string, unknown>) =>
-    request<Run>('POST', `/projetos/${projectId}/execucoes`, { flow, trigger_inputs }),
+    request<Run>('POST', `/projetos/${projectId}/execucoes`, { flow: semVariaveisOrfas(flow), trigger_inputs }),
   execucao: (id: string) => request<Run>('GET', `/execucoes/${id}`),
   execucaoComFluxo: (id: string) => request<Run & { flow: Flow }>('GET', `/execucoes/${id}?fluxo=true`),
   cancelarExecucao: (id: string) => request<{ cancelling: boolean }>('POST', `/execucoes/${id}/cancelar`),
