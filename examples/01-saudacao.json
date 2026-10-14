@@ -1,156 +1,124 @@
 {
   "format": "trama.fluxo",
-  "format_version": 1,
+  "format_version": 2,
   "exported_at": "2026-10-08T00:00:00Z",
   "project": {
-    "name": "Exemplo 1 — Saudação em Python",
-    "description": "Início com um nome → seleciona o campo → bloco Python de saudação → saída. Mostra um bloco personalizado real."
+    "name": "Exemplo 1 — Saudação com Python",
+    "description": "Recebe um nome, monta a saudação com um passo de código Python e mostra o resultado. Esperado: “Olá, Ana!”."
   },
   "flow": {
-    "schema_version": 1,
-    "blocks": [
-      {
-        "id": "inicio",
-        "type": "builtin.inicio",
-        "version": 1,
-        "position": {
-          "x": 0,
-          "y": 80
+    "schema_version": 2,
+    "trigger": {
+      "id": "gatilho",
+      "type": "builtin.gatilho_manual",
+      "version": 1,
+      "label": null,
+      "note": null,
+      "inputs": {},
+      "params": {
+        "campos": [
+          {
+            "id": "nome",
+            "label": "Nome",
+            "type": "texto",
+            "required": true,
+            "default": "Ana"
+          }
+        ]
+      },
+      "run_after": [
+        "sucesso"
+      ],
+      "settings": {
+        "retry": {
+          "count": 0,
+          "interval_s": 2.0
         },
-        "params": {
-          "dados": {
-            "nome": "Ana"
+        "timeout_s": null
+      },
+      "slots": {}
+    },
+    "steps": [
+      {
+        "id": "montar",
+        "type": "builtin.python",
+        "version": 1,
+        "label": "Montar a saudação",
+        "note": null,
+        "inputs": {
+          "nome": {
+            "parts": [
+              {
+                "step": "gatilho",
+                "output": "nome",
+                "path": ""
+              }
+            ]
           }
         },
-        "label": null
-      },
-      {
-        "id": "campo",
-        "type": "builtin.selecionar_campos",
-        "version": 1,
-        "position": {
-          "x": 320,
-          "y": 80
-        },
         "params": {
-          "caminhos": "nome"
+          "entradas": [
+            {
+              "id": "nome",
+              "label": "Nome",
+              "type": "texto",
+              "required": true
+            }
+          ],
+          "saidas": [
+            {
+              "id": "mensagem",
+              "label": "Mensagem",
+              "type": "texto"
+            }
+          ],
+          "codigo": "def run(inputs, params):\n    nome = inputs[\"nome\"].strip().title()\n    return {\"mensagem\": f\"Olá, {nome}!\"}\n"
         },
-        "label": null
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
       },
       {
-        "id": "saudar",
-        "type": "custom.saudacao",
-        "version": 1,
-        "position": {
-          "x": 640,
-          "y": 80
-        },
-        "params": {
-          "prefixo": "Olá"
-        },
-        "label": null
-      },
-      {
-        "id": "saida",
+        "id": "resultado",
         "type": "builtin.saida",
         "version": 1,
-        "position": {
-          "x": 960,
-          "y": 80
+        "label": null,
+        "note": null,
+        "inputs": {
+          "valor": {
+            "parts": [
+              {
+                "step": "montar",
+                "output": "mensagem",
+                "path": ""
+              }
+            ]
+          }
         },
         "params": {
-          "titulo": "Mensagem"
+          "titulo": "Saudação"
         },
-        "label": null
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
       }
-    ],
-    "connections": [
-      {
-        "id": "c1",
-        "source": {
-          "block": "inicio",
-          "port": "dados"
-        },
-        "target": {
-          "block": "campo",
-          "port": "objeto"
-        }
-      },
-      {
-        "id": "c2",
-        "source": {
-          "block": "campo",
-          "port": "valor"
-        },
-        "target": {
-          "block": "saudar",
-          "port": "nome"
-        }
-      },
-      {
-        "id": "c3",
-        "source": {
-          "block": "saudar",
-          "port": "mensagem"
-        },
-        "target": {
-          "block": "saida",
-          "port": "valor"
-        }
-      }
-    ],
-    "viewport": null
+    ]
   },
-  "custom_blocks": [
-    {
-      "id": "custom.saudacao",
-      "version": 1,
-      "name": "Saudação",
-      "description": "Monta uma mensagem de boas-vindas para o nome recebido. Exemplo de bloco Python personalizado.",
-      "category": "Personalizados",
-      "kind": "python",
-      "icon": "python",
-      "inputs": [
-        {
-          "id": "nome",
-          "label": "Nome",
-          "type": "texto",
-          "required": false,
-          "description": "Se não for ligado, usa “mundo”.",
-          "type_from": null,
-          "conditional": false
-        }
-      ],
-      "outputs": [
-        {
-          "id": "mensagem",
-          "label": "Mensagem",
-          "type": "texto",
-          "required": true,
-          "description": "",
-          "type_from": null,
-          "conditional": false
-        }
-      ],
-      "params": [
-        {
-          "id": "prefixo",
-          "label": "Saudação",
-          "type": "texto",
-          "required": false,
-          "default": "Olá",
-          "options": [],
-          "help": "Palavra usada no começo da mensagem.",
-          "placeholder": "",
-          "multiline": false,
-          "allow_empty": false,
-          "min": null,
-          "max": null,
-          "type_from": null,
-          "visible_when": null
-        }
-      ],
-      "code": "def run(inputs: dict, params: dict) -> dict:\n    nome = inputs.get(\"nome\", \"mundo\")\n    prefixo = params.get(\"prefixo\", \"Olá\")\n    return {\"mensagem\": f\"{prefixo}, {nome}!\"}\n"
-    }
-  ]
+  "custom_blocks": []
 }

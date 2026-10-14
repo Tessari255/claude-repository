@@ -1,5 +1,6 @@
+import { semVariaveisOrfas } from './lib/modelo'
 import type {
-  BlockDraft, BlockType, Flow, Issue, PortTypes, Project, ProjectSummary, Run, StepError, SystemInfo,
+  BlockDraft, BlockType, Flow, Issue, Modelo, PortTypes, Project, ProjectSummary, Run, StepError, SystemInfo,
 } from './types'
 
 export class ApiFailure extends Error {
@@ -29,18 +30,20 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       'Confira se o servidor está rodando e tente de novo.')
   }
   if (resp.status === 204) return undefined as T
-  let dados: any = null
+  let dados: unknown = null
   try {
     dados = await resp.json()
   } catch { /* corpo vazio ou inválido */ }
   if (!resp.ok) {
-    const e = dados?.error
+    const e = (dados as { error?: { code?: string; message?: string; suggestion?: string | null; issues?: Issue[] } } | null)?.error
     throw new ApiFailure(resp.status, e?.code ?? 'erro', e?.message ?? 'Ocorreu um erro inesperado.',
       e?.suggestion, e?.issues ?? [])
   }
   return dados as T
 }
 
+// Todo fluxo vai ao servidor sem as variáveis que saíram do texto de uma expressão: o servidor confere e resolve todas,
+// e o rascunho as guarda só para o nome voltar a valer se for redigitado.
 export const api = {
   sistema: () => request<SystemInfo>('GET', '/sistema'),
   blocos: () => request<BlockType[]>('GET', '/blocos'),
@@ -61,20 +64,21 @@ export const api = {
   projeto: (id: string) => request<Project>('GET', `/projetos/${id}`),
   criarProjeto: (name: string, description = '') => request<Project>('POST', '/projetos', { name, description }),
   salvarProjeto: (id: string, corpo: { name?: string; description?: string; flow?: Flow; base_revision?: number }) =>
-    request<Project>('PUT', `/projetos/${id}`, corpo),
+    request<Project>('PUT', `/projetos/${id}`, corpo.flow ? { ...corpo, flow: semVariaveisOrfas(corpo.flow) } : corpo),
   excluirProjeto: (id: string) => request<void>('DELETE', `/projetos/${id}`),
   importarProjeto: (conteudo: unknown) =>
     request<Project & { warnings: string[]; created_blocks: string[] }>('POST', '/projetos/importar', conteudo),
   exportarFluxo: (name: string, description: string, flow: Flow) =>
-    request<unknown>('POST', '/fluxos/exportar', { name, description, flow }),
+    request<unknown>('POST', '/fluxos/exportar', { name, description, flow: semVariaveisOrfas(flow) }),
 
   validar: (flow: Flow) =>
-    request<{ valid: boolean; issues: Issue[]; port_types: PortTypes }>('POST', '/fluxos/validar', { flow }),
-  validarConexao: (flow: Flow, connection: Flow['connections'][number]) =>
-    request<{ ok: boolean; issues: Issue[] }>('POST', '/fluxos/validar-conexao', { flow, connection }),
+    request<{ valid: boolean; issues: Issue[]; port_types: PortTypes }>('POST', '/fluxos/validar', { flow: semVariaveisOrfas(flow) }),
+  modelos: () => request<Modelo[]>('GET', '/modelos'),
 
-  executar: (projectId: string, flow: Flow, initial_data?: Record<string, unknown>) =>
-    request<Run>('POST', `/projetos/${projectId}/execucoes`, { flow, initial_data }),
+  executar: (projectId: string, flow: Flow, trigger_inputs?: Record<string, unknown>) =>
+    request<Run>('POST', `/projetos/${projectId}/execucoes`, { flow: semVariaveisOrfas(flow), trigger_inputs }),
   execucao: (id: string) => request<Run>('GET', `/execucoes/${id}`),
+  execucaoComFluxo: (id: string) => request<Run & { flow: Flow }>('GET', `/execucoes/${id}?fluxo=true`),
+  cancelarExecucao: (id: string) => request<{ cancelling: boolean }>('POST', `/execucoes/${id}/cancelar`),
   historico: (projectId: string) => request<Run[]>('GET', `/projetos/${projectId}/execucoes`),
 }

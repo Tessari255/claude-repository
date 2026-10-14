@@ -8,11 +8,11 @@ from typing import Any
 from pydantic import ValidationError
 
 from .errors import ApiError
+from .erros_sandbox import erro_da_sandbox
 from .models import BlockDraft, BlockType
 from .registry import Registro
 from .sandbox import DockerExecutor
 from .store import Store
-from .engine import erro_da_sandbox
 
 
 def erros_pydantic(exc: ValidationError) -> list[dict[str, Any]]:

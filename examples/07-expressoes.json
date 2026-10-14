@@ -1,0 +1,257 @@
+{
+  "format": "trama.fluxo",
+  "format_version": 2,
+  "exported_at": "2026-10-14T00:00:00Z",
+  "project": {
+    "name": "Exemplo 7 — Expressões Python nos campos",
+    "description": "Campos calculados por expressões Python (o modo “ƒ Expressão” de cada campo), avaliadas no contêiner isolado: o nome formatado com nome.strip().title(), a média com sum(numeros) / len(numeros) e uma condição com len(numeros) > 0. Esperado: “Olá, Ana Souza!”, média 18 e acima da média [23, 42]."
+  },
+  "flow": {
+    "schema_version": 2,
+    "trigger": {
+      "id": "gatilho",
+      "type": "builtin.gatilho_manual",
+      "version": 1,
+      "label": null,
+      "note": null,
+      "inputs": {},
+      "params": {
+        "campos": [
+          {
+            "id": "nome",
+            "label": "Nome",
+            "type": "texto",
+            "required": false,
+            "default": "  ana souza  "
+          },
+          {
+            "id": "numeros",
+            "label": "Números",
+            "type": "lista",
+            "required": false,
+            "default": [
+              4,
+              8,
+              15,
+              16,
+              23,
+              42
+            ]
+          }
+        ]
+      },
+      "run_after": [
+        "sucesso"
+      ],
+      "settings": {
+        "retry": {
+          "count": 0,
+          "interval_s": 2.0
+        },
+        "timeout_s": null
+      },
+      "slots": {}
+    },
+    "steps": [
+      {
+        "id": "formatar",
+        "type": "builtin.compor",
+        "version": 1,
+        "label": "Nome formatado",
+        "note": null,
+        "inputs": {
+          "entrada": {
+            "expr": "nome.strip().title()",
+            "refs": {
+              "nome": {
+                "step": "gatilho",
+                "output": "nome",
+                "path": ""
+              }
+            }
+          }
+        },
+        "params": {},
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      },
+      {
+        "id": "saudacao",
+        "type": "builtin.saida",
+        "version": 1,
+        "label": null,
+        "note": null,
+        "inputs": {
+          "valor": {
+            "expr": "f\"Olá, {nome}!\"",
+            "refs": {
+              "nome": {
+                "step": "formatar",
+                "output": "resultado",
+                "path": ""
+              }
+            }
+          }
+        },
+        "params": {
+          "titulo": "Saudação"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      },
+      {
+        "id": "tem_numeros",
+        "type": "builtin.condicao",
+        "version": 1,
+        "label": "Há números?",
+        "note": null,
+        "inputs": {},
+        "params": {
+          "regras": [
+            {
+              "esq": {
+                "expr": "len(numeros) > 0",
+                "refs": {
+                  "numeros": {
+                    "step": "gatilho",
+                    "output": "numeros",
+                    "path": ""
+                  }
+                }
+              },
+              "op": "verdadeiro"
+            }
+          ],
+          "combinador": "e"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {
+          "sim": [
+            {
+              "id": "media",
+              "type": "builtin.saida",
+              "version": 1,
+              "label": null,
+              "note": null,
+              "inputs": {
+                "valor": {
+                  "expr": "sum(numeros) / len(numeros)",
+                  "refs": {
+                    "numeros": {
+                      "step": "gatilho",
+                      "output": "numeros",
+                      "path": ""
+                    }
+                  }
+                }
+              },
+              "params": {
+                "titulo": "Média"
+              },
+              "run_after": [
+                "sucesso"
+              ],
+              "settings": {
+                "retry": {
+                  "count": 0,
+                  "interval_s": 2.0
+                },
+                "timeout_s": null
+              },
+              "slots": {}
+            },
+            {
+              "id": "acima",
+              "type": "builtin.saida",
+              "version": 1,
+              "label": null,
+              "note": null,
+              "inputs": {
+                "valor": {
+                  "expr": "[n for n in numeros if n > sum(numeros) / len(numeros)]",
+                  "refs": {
+                    "numeros": {
+                      "step": "gatilho",
+                      "output": "numeros",
+                      "path": ""
+                    }
+                  }
+                }
+              },
+              "params": {
+                "titulo": "Acima da média"
+              },
+              "run_after": [
+                "sucesso"
+              ],
+              "settings": {
+                "retry": {
+                  "count": 0,
+                  "interval_s": 2.0
+                },
+                "timeout_s": null
+              },
+              "slots": {}
+            }
+          ],
+          "nao": [
+            {
+              "id": "sem_numeros",
+              "type": "builtin.saida",
+              "version": 1,
+              "label": null,
+              "note": null,
+              "inputs": {
+                "valor": {
+                  "value": "sem números"
+                }
+              },
+              "params": {
+                "titulo": "Média"
+              },
+              "run_after": [
+                "sucesso"
+              ],
+              "settings": {
+                "retry": {
+                  "count": 0,
+                  "interval_s": 2.0
+                },
+                "timeout_s": null
+              },
+              "slots": {}
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "custom_blocks": []
+}

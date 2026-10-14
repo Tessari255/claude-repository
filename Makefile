@@ -1,4 +1,4 @@
-.PHONY: setup executor start dev test test-backend test-frontend e2e clean-dados
+.PHONY: setup executor start dev test test-backend test-frontend lint e2e clean-dados
 
 setup:            ## instala dependências, compila o frontend e constrói o executor isolado
 	./scripts/setup.sh
@@ -20,6 +20,10 @@ test-backend:     ## testes do backend (os que usam Docker são pulados se ele n
 
 test-frontend:    ## typecheck + testes unitários do frontend
 	cd frontend && npm run typecheck && npm test
+
+lint:             ## ruff + pyright no backend, ESLint no frontend
+	cd backend && .venv/bin/ruff check app tests ../executor && .venv/bin/pyright
+	cd frontend && npm run lint
 
 e2e:              ## testes no navegador (Playwright + axe); requer `npm run build` e o executor construído
 	cd frontend && npm run build && npx playwright test

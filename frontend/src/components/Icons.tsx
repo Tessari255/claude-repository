@@ -38,6 +38,23 @@ const CAMINHOS: Record<string, JSX.Element> = {
   panelRight: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   eraser: <path d="M8 19l-4-4 9.5-9.5 6 6L12 19zM12 19h8" />,
   history: <><path d="M4 12a8 8 0 1 0 2.5-5.8L4 8.5" /><path d="M4 4v4.5h4.5M12 8v4l3 2" /></>,
+  bolt: <path d="M13 3L5 13.5h6L10 21l8-10.5h-6z" />,
+  scope: <><path d="M8 4H5v16h3M16 4h3v16h-3" /><path d="M10 9h4M10 12h4M10 15h2" /></>,
+  stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+  var: <path d="M5 5l4.2 14L12 11l2.8 8L19 5M8 12h8" />,
+  undo: <><path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></>,
+  redo: <><path d="M15 14l5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13" /></>,
+  more: <><circle cx="5" cy="12" r="1.6" fill="currentColor" /><circle cx="12" cy="12" r="1.6" fill="currentColor" /><circle cx="19" cy="12" r="1.6" fill="currentColor" /></>,
+  arrowUp: <path d="M12 19V5M6 11l6-6 6 6" />,
+  arrowDown: <path d="M12 5v14M6 13l6 6 6-6" />,
+  checker: <><path d="M6 3v6a5 5 0 0 0 10 0V3" /><path d="M6 3H4.5M16 3h1.5" /><path d="M11 14v2a4 4 0 0 0 8 0v-1.5" /><circle cx="19" cy="12.5" r="1.8" /></>,
+  note: <><path d="M5 4h14v12l-5 5H5z" /><path d="M14 21v-5h5M8 9h8M8 13h4" /></>,
+  retry: <><path d="M20 12a8 8 0 1 1-2.3-5.6" /><path d="M20 4v4.5h-4.5" /></>,
+  settings: <><circle cx="12" cy="12" r="3" /><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.1-1.2L14 3h-4l-.5 2.7a7 7 0 0 0-2.1 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.1 1.2L10 21h4l.5-2.7a7 7 0 0 0 2.1-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z" /></>,
+  dynamic: <><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z" /></>,
+  list: <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" />,
+  template: <><rect x="3.5" y="4" width="17" height="6" rx="1.5" /><rect x="3.5" y="13" width="7.5" height="7" rx="1.5" /><rect x="13.5" y="13" width="7" height="7" rx="1.5" /></>,
+  link: <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />,
 }
 
 export type NomeIcone = keyof typeof CAMINHOS | (string & {})

@@ -1,0 +1,269 @@
+{
+  "format": "trama.fluxo",
+  "format_version": 2,
+  "exported_at": "2026-10-08T00:00:00Z",
+  "project": {
+    "name": "Exemplo 6 — Laço, variável e Python",
+    "description": "Percorre uma lista com “Para cada”, soma cada item em uma variável e termina com um bloco Python que calcula a média. Esperado: soma 60 e média 20."
+  },
+  "flow": {
+    "schema_version": 2,
+    "trigger": {
+      "id": "gatilho",
+      "type": "builtin.gatilho_manual",
+      "version": 1,
+      "label": null,
+      "note": null,
+      "inputs": {},
+      "params": {
+        "campos": [
+          {
+            "id": "numeros",
+            "label": "Números",
+            "type": "lista",
+            "required": true,
+            "default": [
+              10,
+              20,
+              30
+            ]
+          }
+        ]
+      },
+      "run_after": [
+        "sucesso"
+      ],
+      "settings": {
+        "retry": {
+          "count": 0,
+          "interval_s": 2.0
+        },
+        "timeout_s": null
+      },
+      "slots": {}
+    },
+    "steps": [
+      {
+        "id": "total",
+        "type": "builtin.var_inicializar",
+        "version": 1,
+        "label": "Total",
+        "note": null,
+        "inputs": {
+          "inicial": {
+            "value": 0
+          }
+        },
+        "params": {
+          "nome": "total",
+          "tipo": "numero"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      },
+      {
+        "id": "percorrer",
+        "type": "builtin.para_cada",
+        "version": 1,
+        "label": "Para cada número",
+        "note": null,
+        "inputs": {
+          "lista": {
+            "parts": [
+              {
+                "step": "gatilho",
+                "output": "numeros",
+                "path": ""
+              }
+            ]
+          }
+        },
+        "params": {
+          "limite": 100
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {
+          "corpo": [
+            {
+              "id": "somar",
+              "type": "builtin.var_incrementar",
+              "version": 1,
+              "label": "Somar ao total",
+              "note": null,
+              "inputs": {
+                "quantidade": {
+                  "parts": [
+                    {
+                      "step": "percorrer",
+                      "output": "item",
+                      "path": ""
+                    }
+                  ]
+                }
+              },
+              "params": {
+                "variavel": "total"
+              },
+              "run_after": [
+                "sucesso"
+              ],
+              "settings": {
+                "retry": {
+                  "count": 0,
+                  "interval_s": 2.0
+                },
+                "timeout_s": null
+              },
+              "slots": {}
+            }
+          ]
+        }
+      },
+      {
+        "id": "media",
+        "type": "builtin.python",
+        "version": 1,
+        "label": "Calcular a média",
+        "note": null,
+        "inputs": {
+          "soma": {
+            "parts": [
+              {
+                "step": "total",
+                "output": "valor",
+                "path": ""
+              }
+            ]
+          },
+          "quantidade": {
+            "parts": [
+              {
+                "step": "percorrer",
+                "output": "quantidade",
+                "path": ""
+              }
+            ]
+          }
+        },
+        "params": {
+          "entradas": [
+            {
+              "id": "soma",
+              "label": "Soma",
+              "type": "numero",
+              "required": true
+            },
+            {
+              "id": "quantidade",
+              "label": "Quantidade",
+              "type": "numero",
+              "required": true
+            }
+          ],
+          "saidas": [
+            {
+              "id": "media",
+              "label": "Média",
+              "type": "numero"
+            }
+          ],
+          "codigo": "def run(inputs, params):\n    quantidade = inputs[\"quantidade\"]\n    return {\"media\": inputs[\"soma\"] / quantidade if quantidade else 0}\n"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      },
+      {
+        "id": "saida_soma",
+        "type": "builtin.saida",
+        "version": 1,
+        "label": null,
+        "note": null,
+        "inputs": {
+          "valor": {
+            "parts": [
+              {
+                "step": "total",
+                "output": "valor",
+                "path": ""
+              }
+            ]
+          }
+        },
+        "params": {
+          "titulo": "Soma"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      },
+      {
+        "id": "saida_media",
+        "type": "builtin.saida",
+        "version": 1,
+        "label": null,
+        "note": null,
+        "inputs": {
+          "valor": {
+            "parts": [
+              {
+                "step": "media",
+                "output": "media",
+                "path": ""
+              }
+            ]
+          }
+        },
+        "params": {
+          "titulo": "Média"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      }
+    ]
+  },
+  "custom_blocks": []
+}

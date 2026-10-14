@@ -1,0 +1,210 @@
+{
+  "format": "trama.fluxo",
+  "format_version": 2,
+  "exported_at": "2026-10-08T00:00:00Z",
+  "project": {
+    "name": "Exemplo 5 — Tentar e capturar o erro",
+    "description": "O padrão “tentar / capturar” do Power Automate: o escopo “Tentar” roda um código Python que divide por zero e falha; o passo seguinte, configurado para rodar após a falha, captura o erro e o fluxo termina com sucesso. Esperado: “Não foi possível calcular: …”."
+  },
+  "flow": {
+    "schema_version": 2,
+    "trigger": {
+      "id": "gatilho",
+      "type": "builtin.gatilho_manual",
+      "version": 1,
+      "label": null,
+      "note": null,
+      "inputs": {},
+      "params": {
+        "campos": [
+          {
+            "id": "divisor",
+            "label": "Divisor",
+            "type": "numero",
+            "required": true,
+            "default": 0
+          }
+        ]
+      },
+      "run_after": [
+        "sucesso"
+      ],
+      "settings": {
+        "retry": {
+          "count": 0,
+          "interval_s": 2.0
+        },
+        "timeout_s": null
+      },
+      "slots": {}
+    },
+    "steps": [
+      {
+        "id": "tentar",
+        "type": "builtin.escopo",
+        "version": 1,
+        "label": "Tentar",
+        "note": null,
+        "inputs": {},
+        "params": {},
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {
+          "corpo": [
+            {
+              "id": "dividir",
+              "type": "builtin.python",
+              "version": 1,
+              "label": "Dividir 100 pelo divisor",
+              "note": null,
+              "inputs": {
+                "divisor": {
+                  "parts": [
+                    {
+                      "step": "gatilho",
+                      "output": "divisor",
+                      "path": ""
+                    }
+                  ]
+                }
+              },
+              "params": {
+                "entradas": [
+                  {
+                    "id": "divisor",
+                    "label": "Divisor",
+                    "type": "numero",
+                    "required": true
+                  }
+                ],
+                "saidas": [
+                  {
+                    "id": "resultado",
+                    "label": "Resultado",
+                    "type": "numero"
+                  }
+                ],
+                "codigo": "def run(inputs, params):\n    return {\"resultado\": 100 / inputs[\"divisor\"]}\n"
+              },
+              "run_after": [
+                "sucesso"
+              ],
+              "settings": {
+                "retry": {
+                  "count": 0,
+                  "interval_s": 2.0
+                },
+                "timeout_s": null
+              },
+              "slots": {}
+            },
+            {
+              "id": "ok",
+              "type": "builtin.saida",
+              "version": 1,
+              "label": null,
+              "note": null,
+              "inputs": {
+                "valor": {
+                  "parts": [
+                    {
+                      "step": "dividir",
+                      "output": "resultado",
+                      "path": ""
+                    }
+                  ]
+                }
+              },
+              "params": {
+                "titulo": "Resultado da divisão"
+              },
+              "run_after": [
+                "sucesso"
+              ],
+              "settings": {
+                "retry": {
+                  "count": 0,
+                  "interval_s": 2.0
+                },
+                "timeout_s": null
+              },
+              "slots": {}
+            }
+          ]
+        }
+      },
+      {
+        "id": "capturar",
+        "type": "builtin.compor",
+        "version": 1,
+        "label": "Capturar o erro",
+        "note": "Roda só se o escopo “Tentar” falhar.",
+        "inputs": {
+          "entrada": {
+            "parts": [
+              "Não foi possível calcular: ",
+              {
+                "step": "tentar",
+                "output": "erro",
+                "path": ""
+              }
+            ]
+          }
+        },
+        "params": {},
+        "run_after": [
+          "falhou"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      },
+      {
+        "id": "aviso",
+        "type": "builtin.saida",
+        "version": 1,
+        "label": null,
+        "note": null,
+        "inputs": {
+          "valor": {
+            "parts": [
+              {
+                "step": "capturar",
+                "output": "resultado",
+                "path": ""
+              }
+            ]
+          }
+        },
+        "params": {
+          "titulo": "Aviso"
+        },
+        "run_after": [
+          "sucesso"
+        ],
+        "settings": {
+          "retry": {
+            "count": 0,
+            "interval_s": 2.0
+          },
+          "timeout_s": null
+        },
+        "slots": {}
+      }
+    ]
+  },
+  "custom_blocks": []
+}

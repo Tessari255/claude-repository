@@ -10,14 +10,16 @@ from __future__ import annotations
 import dataclasses
 import os
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import Limites, Settings  # noqa: E402
-from app.sandbox import DockerExecutor  # noqa: E402
+from app.config import Limites, Settings
+from app.sandbox import DockerExecutor
 
 IMAGEM = os.environ.get("TRAMA_EXECUTOR_IMAGE", "trama-executor:2")
 LIMITES_TESTE = Limites(tempo_s=4.0, memoria_mb=128, folga_inicio_s=5.0)
@@ -30,6 +32,28 @@ def executor() -> DockerExecutor:
     if not st.disponivel:
         pytest.skip(f"Executor isolado indisponível ({st.motivo}): {st.mensagem}")
     return ex
+
+
+def esperar_prontos(ex: DockerExecutor, quantos: int, limite_s: float = 30.0) -> None:
+    """Espera o pool do executor ter ``quantos`` contêineres ociosos prontos (a reposição roda em segundo plano)."""
+    fim = time.monotonic() + limite_s
+    while ex.estado_pool()["prontos"] < quantos:
+        assert time.monotonic() < fim, f"o pool não chegou a {quantos} prontos: {ex.estado_pool()}"
+        time.sleep(0.05)
+
+
+@pytest.fixture(scope="module")
+def executor_pool() -> Iterator[DockerExecutor]:
+    """Executor com o pool aquecido ligado. Por módulo: os ociosos são removidos quando o módulo termina e não aparecem
+    em módulos que olham o Docker."""
+    ex = DockerExecutor(IMAGEM, LIMITES_TESTE, pool=2)
+    st = ex.status(forcar=True)
+    if not st.disponivel:
+        pytest.skip(f"Executor isolado indisponível ({st.motivo}): {st.mensagem}")
+    ex.aquecer()
+    esperar_prontos(ex, 2)
+    yield ex
+    ex.encerrar()
 
 
 @pytest.fixture()
@@ -58,8 +82,8 @@ def _montar(settings, executor):
     registro = Registro(store)
     motor = Motor(store, executor, registro, settings.limites)
 
-    def executar(flow: dict, dados_iniciais: dict | None = None) -> dict:
-        run_id = motor.preparar(Flow.model_validate(flow), None, dados_iniciais)
+    def executar(flow: dict, dados_gatilho: dict | None = None) -> dict:
+        run_id = motor.preparar(Flow.model_validate(flow), None, dados_gatilho)
         motor.rodar(run_id)
         return store.obter_execucao(run_id)
 

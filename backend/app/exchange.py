@@ -8,6 +8,7 @@ importado só roda no executor isolado, como qualquer outro.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from typing import Any, Literal
 
@@ -15,7 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .custom_blocks import erros_pydantic
 from .errors import ApiError
+from .migracao import fluxo_v1, migrar_fluxo
 from .models import BlockType, Flow
+from .passos import todos_os_passos
 from .registry import Registro
 from .store import Store, agora
 from .validation import analisar
@@ -33,7 +36,7 @@ class InfoProjeto(BaseModel):
 class Envelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["trama.fluxo"]
-    format_version: Literal[1]
+    format_version: Literal[2]
     exported_at: str | None = None
     project: InfoProjeto
     flow: Flow
@@ -41,7 +44,7 @@ class Envelope(BaseModel):
 
 
 def exportar(registro: Registro, nome: str, descricao: str, flow: Flow) -> dict[str, Any]:
-    usados = sorted({(b.type, b.version) for b in flow.blocks if b.type.startswith("custom.")})
+    usados = sorted({(p.type, p.version) for p in todos_os_passos(flow) if p.type.startswith("custom.")})
     blocos: list[dict[str, Any]] = []
     for type_id, versao in usados:
         tipo = registro.resolver(type_id, versao)
@@ -49,7 +52,7 @@ def exportar(registro: Registro, nome: str, descricao: str, flow: Flow) -> dict[
             raise ApiError(422, "bloco_desconhecido",
                            f"O fluxo usa o bloco {type_id} (v{versao}), que não existe mais; não é possível exportar.")
         blocos.append(tipo.model_dump(exclude={"created_at"}))
-    return {"format": FORMATO, "format_version": 1, "exported_at": agora(),
+    return {"format": FORMATO, "format_version": 2, "exported_at": agora(),
             "project": {"name": nome, "description": descricao},
             "flow": flow.model_dump(), "custom_blocks": blocos}
 
@@ -66,6 +69,10 @@ def importar(store: Store, registro: Registro, bruto: Any, *, aplicar: bool = Tr
     if not isinstance(bruto, dict):
         raise ApiError(422, "arquivo_invalido", "O arquivo não parece ser um fluxo da Trama.",
                        sugestao="Escolha um arquivo .json exportado pela própria Trama.")
+    if bruto.get("format_version") == 1 and isinstance(bruto.get("flow"), dict) and fluxo_v1(bruto["flow"]):
+        # arquivo exportado pela versão anterior (grafo de blocos): converte para passos antes de validar
+        with contextlib.suppress(Exception):
+            bruto = {**bruto, "format_version": 2, "flow": migrar_fluxo(bruto["flow"])}
     try:
         env = Envelope.model_validate(bruto)
     except ValidationError as e:
@@ -78,7 +85,7 @@ def importar(store: Store, registro: Registro, bruto: Any, *, aplicar: bool = Tr
     if repetidos:
         raise ApiError(422, "arquivo_invalido", f"O arquivo repete a definição de bloco: {', '.join(repetidos)}.")
     # só entram na biblioteca os blocos que o fluxo realmente usa
-    usados = {(b.type, b.version) for b in env.flow.blocks}
+    usados = {(p.type, p.version) for p in todos_os_passos(env.flow)}
     descartados = [t.name for t in env.custom_blocks if (t.id, t.version) not in usados]
     if descartados:
         avisos.append(f"Blocos do arquivo que o fluxo não usa foram ignorados: {', '.join(descartados[:5])}.")
@@ -107,13 +114,13 @@ def importar(store: Store, registro: Registro, bruto: Any, *, aplicar: bool = Tr
         avisos.append(f"O bloco “{t.name}” já existia com conteúdo diferente; foi importado como uma cópia separada.")
 
     flow = env.flow.model_copy(deep=True)
-    for b in flow.blocks:
-        if (b.type, b.version) in remap:
-            b.type, b.version = remap[(b.type, b.version)]
-        elif b.type.startswith("custom.") and (b.type, b.version) not in ids_no_arquivo \
-                and registro.resolver(b.type, b.version) is None:
+    for p in todos_os_passos(flow):
+        if (p.type, p.version) in remap:
+            p.type, p.version = remap[(p.type, p.version)]
+        elif p.type.startswith("custom.") and (p.type, p.version) not in ids_no_arquivo \
+                and registro.resolver(p.type, p.version) is None:
             raise ApiError(422, "bloco_ausente",
-                           f"O fluxo usa o bloco personalizado “{b.label or b.type}”, mas o arquivo não o inclui.",
+                           f"O fluxo usa o bloco personalizado “{p.label or p.type}”, mas o arquivo não o inclui.",
                            sugestao="Exporte o fluxo novamente na instalação de origem.")
 
     sobreposicao = {(t.id, t.version): t for t in novos}

@@ -10,6 +10,13 @@ RUN python -m pip uninstall -y pip setuptools wheel >/dev/null 2>&1 || true
 COPY runner.py /opt/trama/runner.py
 RUN chmod 0555 /opt/trama && chmod 0444 /opt/trama/runner.py
 
+# Avisa à API que este runner entende o modo `batch` (um laço inteiro em um único contêiner). Uma imagem antiga, sem o
+# rótulo, continua funcionando: a API só não usa o lote com ela.
+LABEL trama.runner.lote="1"
+# Este runner também calcula as expressões Python dos campos (modo `expr`). Com uma imagem sem o rótulo, a API recusa as
+# expressões com um pedido para reconstruir a imagem, em vez de um erro confuso do runner antigo.
+LABEL trama.runner.expr="1"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
@@ -23,4 +30,6 @@ WORKDIR /tmp
 # `timeout` roda como PID 1 do contêiner: é um vigia que o código do usuário não consegue encerrar e que mata
 # tudo se o host (a API) morrer no meio da execução. O host passa os segundos e o comando (constantes, nunca
 # dados do usuário): `docker run ... IMAGEM <segundos> python -I /opt/trama/runner.py`.
+# No pool aquecido o host troca o ENTRYPOINT por `bash` (script fixo em sandbox/executor.py): o contêiner espera o trabalho
+# parado e, quando ele chega, vira este mesmo `timeout` por `exec`, então o vigia do trabalho conta desde o recebimento.
 ENTRYPOINT ["timeout", "-s", "KILL"]
