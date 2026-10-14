@@ -1,8 +1,8 @@
 # Trama — automação em passos, com Python quando você precisar
 
 Monte fluxos como no **Power Automate**: um *gatilho* e uma lista de *passos* empilhados, onde cada passo usa o
-**conteúdo dinâmico** dos anteriores. A diferença é que, em vez de expressões, você tem **Python de verdade**: um passo
-“Executar código Python” dentro do fluxo (ou um bloco Python reutilizável da biblioteca) rodando em um contêiner Docker isolado.
+**conteúdo dinâmico** dos anteriores. A diferença é que as expressões são **Python de verdade**, rodando em um contêiner Docker isolado:
+uma expressão curta direto no campo (`len(itens) * 2`), um passo “Executar código Python” dentro do fluxo ou um bloco Python reutilizável da biblioteca.
 
 ![Fluxo com condição já testado: o caminho “Se sim” concluiu e o “Se não” ficou ignorado](docs/img/editor.png)
 
@@ -27,7 +27,7 @@ Pré-requisitos: **Python 3.11+** (testado com 3.13), **Node.js 18+** (testado c
 ./scripts/start.sh     # inicia em http://127.0.0.1:8000
 ```
 
-Abra <http://127.0.0.1:8000>. A tela inicial tem uma galeria de **modelos** (os seis exemplos abaixo): “Usar este modelo” cria
+Abra <http://127.0.0.1:8000>. A tela inicial tem uma galeria de **modelos** (os sete exemplos abaixo): “Usar este modelo” cria
 um fluxo pronto para testar. Atalhos do `make`: `setup`, `start`, `dev` (API com recarga + Vite em `localhost:5173`), `test`, `e2e`.
 
 > Se o Docker Hub recusar o download da imagem base por limite de requisições, use um espelho:
@@ -47,6 +47,7 @@ execução “sem isolamento” como alternativa. Os demais passos continuam fun
 | `04-lista.json` | Transformar cada item de uma lista, com limite | `[30, 60, 90]` |
 | `05-tratar-erros.json` | **Tentar e capturar**: escopo que falha + passo “Executar após: falhou” | `Não foi possível calcular: …` (o fluxo termina com sucesso) |
 | `06-laco-e-variavel.json` | **Para cada** + variável acumuladora + Python calculando a média | soma `60`, média `20` |
+| `07-expressoes.json` | **Expressões Python** nos campos: `nome.strip().title()`, `sum(numeros) / len(numeros)` e uma condição com `len(numeros) > 0` | `Olá, Ana Souza!`, média `18`, acima da média `[23, 42]` (com a lista vazia: `sem números`) |
 
 São arquivos de exportação da própria Trama: também dá para usar **Importar fluxo** na tela inicial.
 Quem prefere começar com a lista de projetos já preenchida pode iniciar com `TRAMA_SEED_EXAMPLES=1`.
@@ -72,7 +73,7 @@ A Trama copia o *jeito de montar* do Power Automate e troca o que é “express�
 | Histórico de execuções (somente leitura) | **Histórico**: abre o fluxo **como ele era** na época da execução, com o estado de cada passo e de cada repetição |
 | Desfazer / refazer, duplicar e mover passos | Desfazer/refazer (`Ctrl+Z`, `Ctrl+Y`) e menu **⋯** do passo (duplicar, mover, excluir) |
 | Modelos | Galeria de modelos na tela inicial |
-| **Expressões** (`@{…}`) | **Código Python** — o diferencial da Trama (veja abaixo) |
+| **Expressões** (`@{…}`) | **Expressões Python** no próprio campo (modo **ƒ Expressão**) e, para mais lógica, **código Python** — o diferencial da Trama (veja abaixo) |
 
 O que **não** existe (de propósito, para manter o foco): conectores externos, agendamento e outros gatilhos, ramificações
 paralelas e *Switch*. Uma condição não tem “paralelo”: os passos rodam **um por vez, de cima para baixo**.
@@ -86,7 +87,8 @@ paralelas e *Switch*. Uma condição não tem “paralelo”: os passos rodam **
 2. Clique em **+** (entre dois passos) ou em **Novo passo** para escolher um passo. O seletor tem busca e agrupa por categoria
    (Controle, Variáveis, Dados, Texto, Cálculo, Python, Saída, mais os seus blocos).
 3. Em cada campo do painel da direita, digite um valor fixo ou clique em **Conteúdo dinâmico** para usar o resultado de um passo
-   anterior (ou do gatilho). Só aparece o que está **disponível naquele ponto**: o gatilho, os passos de cima e, dentro de uma
+   anterior (ou do gatilho); para calcular o valor, ligue **ƒ Expressão** e escreva uma expressão Python (veja abaixo).
+   Só aparece o que está **disponível naquele ponto**: o gatilho, os passos de cima e, dentro de uma
    condição ou laço, o que veio de fora. O que foi criado *dentro* de uma condição ou laço não vale depois dela; o que foi criado dentro de um
    **escopo** vale.
 4. **Ctrl+S** salva (rascunhos com campos faltando também podem ser salvos). **Testar** (`Ctrl+Enter`) executa com os dados que você
@@ -120,7 +122,17 @@ e os passos seguintes ficam **ignorados**, cada um explicando por quê.
 
 ---
 
-## Python: dois jeitos
+## Python: três jeitos
+
+**0. Expressão no campo.** Em qualquer campo, **ƒ Expressão** troca o valor por uma expressão Python, como `nome.strip().title()` ou
+`round(sum(numeros) / len(numeros), 2)`. **Conteúdo dinâmico** insere uma *variável* (o nome vem do rótulo da saída: “Números” vira `numeros`);
+variáveis que saíram do texto não são gravadas. O verificador confere a expressão **sem executá-la** (sintaxe, com a coluna; nomes; nada de
+atributos com `__`). Ela só pode usar as suas variáveis e as funções `abs all any bool dict divmod enumerate filter float int isinstance len list map
+max min pow range reversed round set sorted str sum tuple zip`. Quando o passo roda, todas as expressões dele (inclusive as das regras de uma
+condição) vão em **um** trabalho ao contêiner; o resultado precisa ser JSON e é conferido contra o tipo do campo; um erro aponta o campo, a
+expressão e a coluna, e não é repetido pelas novas tentativas. *Repetir até* calcula as expressões da condição a cada repetição, e um *Para cada*
+cujo passo Python usa expressão roda um item por vez (fora do lote). Fluxos com expressões não abrem em versões da Trama anteriores a elas, e uma
+imagem do executor anterior a elas (sem o rótulo `trama.runner.expr`) as recusa pedindo para reconstruí-la com `./scripts/build-executor.sh`.
 
 **1. Passo “Executar código Python” (no próprio fluxo).** Declare as entradas (cada uma recebe um valor fixo ou conteúdo dinâmico) e as saídas,
 e escreva a função. Outros passos usam suas saídas como qualquer conteúdo dinâmico. É o equivalente a uma expressão, só que com a linguagem inteira.
@@ -156,7 +168,7 @@ def run(inputs: dict, params: dict) -> dict:
   tem a sua linha no histórico; no máximo 5.000 linhas por execução.
   Um *Para cada* com **só um passo Python** dentro roda todos os itens de uma vez (veja *Para cada em lote*); o histórico é o mesmo.
 * **Falhas:** um passo que falha deixa os seguintes **ignorados**, a menos que algum deles esteja configurado para rodar após a falha (e então a falha é
-  considerada tratada). Erros de configuração (campo faltando, tipo errado) nunca são repetidos; falhas do código ou do tempo limite podem ser (política de repetição do passo).
+  considerada tratada). Erros de configuração (campo faltando, tipo errado, expressão que falha) nunca são repetidos; falhas do código ou do tempo limite podem ser (política de repetição do passo).
 * Limites do fluxo: 200 passos e 8 níveis de aninhamento.
 
 ---
@@ -211,7 +223,9 @@ propósito para provar que o que protege é o contêiner. O processo da API prec
 elevado no computador. Veja as limitações abaixo.
 
 O **conteúdo dinâmico nunca executa nada**: é só uma referência (`passo`, `saída`, `caminho`) resolvida pelo motor, que lê chaves de objetos e
-posições de listas e não alcança atributos do Python. Isso é coberto por teste.
+posições de listas e não alcança atributos do Python. Isso é coberto por teste. As **expressões** dos campos também não rodam na API: lá elas só
+são analisadas pelo texto (`ast.parse`), e são avaliadas no contêiner, com os mesmos limites, o pool e a mesma desconfiança da resposta. A lista curta
+de funções e a recusa de `__` são conveniência; um teste prova que, mesmo contornando a análise, a expressão continua presa ao contêiner (usuário 65534, só `lo`).
 
 Os **passos internos** rodam no processo da API (código nosso), então também têm teto: o tamanho do resultado é conferido *antes* de montá-lo
 (substituir texto, adicionar texto a listas, selecionar campos, montar texto com fichas), parâmetros de texto até 100.000 caracteres, JSON digitado até 1 MB, no máximo
@@ -258,7 +272,8 @@ O fluxo é um JSON (chaves em inglês, valores em português) — trecho do exem
       "params": { "operacao": "somar" }, "run_after": ["sucesso"] } ] }
 ```
 
-Cada campo de um passo é um valor fixo (`{"value": …}`) ou uma lista de pedaços (`{"parts": [...]}`) de texto e referências. Passos com
+Cada campo de um passo é um valor fixo (`{"value": …}`), uma lista de pedaços (`{"parts": [...]}`) de texto e referências ou uma expressão
+(`{"expr": "len(itens) * 2", "refs": {"itens": {…referência…}}}`; até 2.000 caracteres e 20 variáveis). Passos com
 ramificações ou corpo (`condicao`, `para_cada`, `escopo`…) guardam os filhos em `slots`. O histórico guarda, por execução e por passo (e por repetição):
 entradas, saídas, logs, erro, estado e tempos.
 
@@ -289,9 +304,9 @@ O histórico de execuções antigas **não é convertido** (ele descrevia blocos
 ## Testes
 
 ```bash
-make test-backend    # 608 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
-make test-frontend   # typecheck + 20 testes unitários (vitest) das operações sobre o fluxo
-make e2e             # 28 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
+make test-backend    # 658 testes (pytest). Os que usam Docker são PULADOS, com o motivo, se ele não estiver disponível
+make test-frontend   # typecheck + 63 testes unitários (vitest) das operações sobre o fluxo
+make e2e             # 30 testes no navegador (Playwright) + verificação automática de acessibilidade (axe, WCAG 2.1 AA)
                      # 1ª vez: `cd frontend && npx playwright install chromium` (ou PLAYWRIGHT_CHROMIUM_PATH=/caminho/do/chrome)
 ```
 
@@ -313,6 +328,7 @@ make e2e             # 28 testes no navegador (Playwright) + verificação autom
 | 12 | Fluxos e bancos da versão anterior são convertidos mantendo o resultado dos quatro exemplos originais | `test_migracao.py` (com arquivos reais em `tests/fixtures/v1/`); e2e `arquivo exportado pela versão anterior…` |
 | 13 | O histórico abre o fluxo **da época**, somente leitura | `test_api.py::test_a_execucao_guarda_o_fluxo_da_epoca_*`; e2e `histórico: abrir uma execução antiga…` |
 | 14 | Um *Para cada* de 50 itens com um passo Python dentro roda em menos de 5 s (~1 s), e o histórico é o mesmo do caminho de um contêiner por item | `test_python_flows.py::test_laco_de_50_itens_*`; `test_lote_equivalencia.py` (41 fluxos nos dois caminhos); e2e `Para cada com um passo Python dentro…` |
+| 15 | Expressões Python nos campos: conferidas só pelo texto antes de executar, avaliadas no contêiner (todas as de um passo em um trabalho) e com o erro apontando o campo, a expressão e a coluna | `test_expressoes.py`; e2e `expressão Python num campo: erro de sintaxe no verificador…` |
 
 O isolamento é verificado **de dentro do contêiner**: usuário 65534, rootfs somente leitura (inclusive `/var/tmp`), só a interface `lo`,
 capacidades zeradas, `NoNewPrivs`, seccomp ativo, limites de memória/pids/CPU lidos do cgroup, bomba de processos contida, sem
@@ -368,6 +384,7 @@ dados malformados. Os mesmos testes foram portados para o formato em passos (a s
   de bibliotecas (rede desligada e só a biblioteca padrão).
 * Os passos rodam **um por vez**. *Executar após* considera apenas o passo imediatamente anterior (use um **Escopo** para agrupar).
 * Variáveis só podem ser criadas na lista principal (não dentro de condições, laços ou escopos), como no Power Automate.
+* Cada passo com expressão Python paga uma ida ao contêiner antes de rodar (mediana medida na máquina de desenvolvimento: ~190 ms com o pool, ~370 ms sem); um *Para cada* cujo passo Python usa expressão não roda em lote.
 * O que é criado dentro de uma condição ou de um laço **não fica disponível depois dele**; para usar um resultado fora, guarde-o em uma variável.
 * O gatilho tem campos tipados que você declara (nada de formulários ou esquemas JSON do Power Automate).
 * Duplicar copia passos no mesmo fluxo (não entre fluxos). Desfazer/refazer vale para a sessão de edição aberta. O aviso de “alterações não salvas” cobre fechar/recarregar
