@@ -456,3 +456,24 @@ def test_comando_do_docker_tem_todas_as_restricoes(executor):
         assert flag in cmd, flag
     assert "-v " not in cmd and "--volume" not in cmd and "--env" not in cmd and "-e " not in cmd  # nada do host entra
     assert "--rm" not in cmd  # removido explicitamente, depois de ler o motivo do encerramento
+
+
+@pytest.mark.parametrize("respostas, esperado, leituras", [
+    (["false", "false", "true"], True, 3),  # a marcação do OOM chegou depois do código de saída (cgroup v2)
+    (["false"] * 6, False, 6),              # SIGKILL sem OOM: desiste depois de um teto de leituras
+    (["true"], True, 1),
+])
+def test_oom_tolera_a_marcacao_assincrona_do_daemon(monkeypatch, respostas, esperado, leituras):
+    from app.sandbox import executor as modulo
+    feitas = []
+
+    def inspect(cmd, **_):
+        feitas.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, respostas[min(len(feitas), len(respostas)) - 1] + "\n", "")
+
+    monkeypatch.setattr(modulo.subprocess, "run", inspect)
+    monkeypatch.setattr(modulo.time, "sleep", lambda _s: None)
+    ex = DockerExecutor(IMAGEM, Limites(), docker_bin="docker-que-nao-existe-xyz", pool=0)
+    assert ex._oom("trama-x") is esperado
+    assert len(feitas) == leituras
+    assert all(c[-1] == "trama-x" and "{{.State.OOMKilled}}" in c for c in feitas)

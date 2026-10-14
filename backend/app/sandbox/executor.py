@@ -671,13 +671,20 @@ class DockerExecutor:
         except (subprocess.TimeoutExpired, OSError):
             log.warning("Não foi possível remover o contêiner %s (a limpeza da próxima inicialização cuida dele).", nome)
 
-    def _oom(self, nome: str) -> bool:
-        try:
-            r = subprocess.run([self.docker_bin, "inspect", "-f", "{{.State.OOMKilled}}", nome],
-                               capture_output=True, text=True, timeout=10)
-            return r.stdout.strip() == "true"
-        except (subprocess.TimeoutExpired, OSError):
-            return False
+    def _oom(self, nome: str, tentativas: int = 6) -> bool:
+        # O daemon marca o OOMKilled de forma assíncrona: no cgroup v2 a marcação pode chegar depois do código de
+        # saída 137, então uma leitura só confunde falta de memória com "encerrado pelo sistema".
+        for i in range(tentativas):
+            try:
+                r = subprocess.run([self.docker_bin, "inspect", "-f", "{{.State.OOMKilled}}", nome],
+                                   capture_output=True, text=True, timeout=10)
+            except (subprocess.TimeoutExpired, OSError):
+                return False
+            if r.stdout.strip() == "true":
+                return True
+            if i < tentativas - 1:
+                time.sleep(0.2)
+        return False
 
     def _rodar(self, corpo: bytes, token: str, limites: Limites, nome: str,
                aquecido: Aquecido | None = None) -> SandboxResult:
