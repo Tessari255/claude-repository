@@ -60,6 +60,7 @@ def test_campo_com_expressao_relê_igual_e_so_emite_a_chave_ativa():
     {"expr": "x", "refs": {"Nome": {"step": "gatilho", "output": "x"}}},
     {"expr": "x", "refs": {"1a": {"step": "gatilho", "output": "x"}}},
     {"expr": "x", "refs": {"a b": {"step": "gatilho", "output": "x"}}},
+    {"expr": "x", "refs": {"if\n": {"step": "gatilho", "output": "x"}}},  # o $ da regex casaria antes do \n final
     {"expr": "x" * 2001},
     {"expr": "x", "refs": {f"v{i}": {"step": "gatilho", "output": "x"} for i in range(21)}},
 ])
@@ -93,6 +94,11 @@ def test_expressao_correta_nao_tem_problemas_e_o_tipo_fica_para_a_execucao():
     ("outro + 1", "“outro”"),
     ("[y for x in nome]", "“y”"),
     ("(lambda a: b)(1)", "“b”"),
+    ("[x for x in x]", "“x”"),  # o primeiro iterável roda fora da compreensão
+    ("(lambda a=a: a)()", "“a”"),  # os padrões são avaliados fora da lambda
+    ("await nome", "(coluna 1)"),  # o ast aceita; o compilador do runner recusa
+    ("(lambda a, a: a)(1, 2)", "(coluna 12)"),
+    ("nome(a=1, a=2)", "(coluna 11)"),
     ("(z := 1) + z", "“z”"),
 ])
 def test_expressao_invalida_vira_problema_no_campo(codigo, trecho):
@@ -107,11 +113,23 @@ def test_erro_de_sintaxe_aponta_a_coluna_em_caracteres():
     assert "coluna 10" in msg and "parênteses" in dica
     msg, _ = problema_da_expressao("'ç' + nada", {})  # type: ignore[misc]
     assert "“nada”" in msg and "coluna 7" in msg  # o ast conta bytes; a mensagem conta caracteres
-    assert problema_da_expressao("a\x00", {})[0].startswith("tem")  # type: ignore[index]
+    assert "coluna 18" in problema_da_expressao("nome('ção', a=1, a=2)", {})[0]  # type: ignore[index]  # o compilador também conta bytes
+    assert "caractere nulo" in problema_da_expressao("a\x00", {})[0]  # type: ignore[index]
     assert "grande demais" in problema_da_expressao("1+" * 1001 + "1", {})[0]  # type: ignore[index]
     # árvores fundas são percorridas sem recursão: o verificador responde em vez de estourar a pilha
     assert problema_da_expressao("-" * 1999 + "1", {}) is None
     assert "“x”" in problema_da_expressao("not " * 490 + "x", {})[0]  # type: ignore[index]
+
+
+def test_o_fluxo_tem_um_teto_de_caracteres_de_expressao_somados():
+    longa = "+".join(["nome"] * 400)  # 1999 caracteres, válida
+
+    def com(n: int) -> list[str]:
+        f = fluxo([compor(f"c{i}", expr(longa, nome=("gatilho", "nome"))) for i in range(n)], nomes_e_numero())
+        return [i.step_id for i in analisar_dict(f).issues if i.code == "expressao_invalida"]
+
+    assert com(50) == []  # 99.950 caracteres
+    assert com(51) == ["c50"]
 
 
 def test_variaveis_seguem_as_regras_de_visibilidade_do_conteudo_dinamico():

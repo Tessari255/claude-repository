@@ -40,6 +40,7 @@ MAX_CODIGO = 64 * 1024
 MAX_VERSAO = 1_000_000
 MAX_PARTES = 60
 MAX_EXPRESSAO = 2000  # caracteres de uma expressão Python de campo
+MAX_EXPRESSOES_FLUXO = 100_000  # caracteres de expressão somados num fluxo: limita o custo do verificador
 MAX_VARIAVEIS = 20    # variáveis (conteúdos dinâmicos) de uma expressão
 MAX_TENTATIVAS = 5
 
@@ -265,7 +266,7 @@ class Campo(Estrito):
         if self.refs is not None and self.expr is None:
             raise ValueError("as variáveis (refs) só valem junto com uma expressão (expr)")
         for nome in self.refs or {}:
-            if not RE_VARIAVEL.match(nome) or keyword.iskeyword(nome):
+            if not RE_VARIAVEL.fullmatch(nome) or keyword.iskeyword(nome):
                 raise ValueError(f"nome de variável inválido na expressão: {nome!r} (use letras minúsculas, números e _, começando por letra)")
         try:
             if tem_valor:

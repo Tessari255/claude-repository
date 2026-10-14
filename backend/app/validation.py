@@ -32,7 +32,7 @@ from .blocks.builtin import (
     requer_sandbox,
 )
 from .config import Limites
-from .models import ID_GATILHO, MAX_EXPRESSAO, BlockType, Campo, Flow, Issue, ParamDef, Passo, Ref
+from .models import ID_GATILHO, MAX_EXPRESSAO, MAX_EXPRESSOES_FLUXO, BlockType, Campo, Flow, Issue, ParamDef, Passo, Ref
 from .passos import definicao_efetiva, percorrer, portas_declaradas, regras_declaradas
 from .tipos import ROTULOS_TIPO, rotulo_tipo, tipo_do_valor, tipos_compativeis, valor_e_do_tipo
 
@@ -165,27 +165,31 @@ def _posicao(linha: int | None, coluna: int | None) -> str:
     return f" (linha {linha}, coluna {coluna})" if linha and linha > 1 else f" (coluna {coluna})"
 
 
-def _coluna(texto: str, no: ast.expr) -> int:
-    """A coluna (a partir de 1, em caracteres) de um nó: o ``col_offset`` do ast conta bytes UTF-8."""
+def _coluna(texto: str, linha: int, deslocamento: int) -> int:
+    """A coluna (a partir de 1, em caracteres) de um deslocamento em bytes UTF-8, que é como o ast e o compilador contam."""
     linhas = texto.split("\n")
-    if not 1 <= no.lineno <= len(linhas):
-        return no.col_offset + 1
-    return len(linhas[no.lineno - 1].encode("utf-8")[: no.col_offset].decode("utf-8", "ignore")) + 1
+    if not 1 <= linha <= len(linhas):
+        return deslocamento + 1
+    return len(linhas[linha - 1].encode("utf-8")[:deslocamento].decode("utf-8", "ignore")) + 1
 
 
 def problema_da_expressao(expr: str, variaveis: Any) -> tuple[str, str] | None:
     """O primeiro problema da expressão (mensagem que completa “a expressão de X …” e dica), ou None.
 
-    Só lê o texto: ``ast.parse`` monta a árvore sem executar nada. Todo nome livre precisa ser uma das ``variaveis`` ou
+    Só lê o texto: ``ast.parse`` monta a árvore e ``compile`` a compila, sem executar nada. Todo nome livre precisa ser uma das ``variaveis`` ou
     uma função de ``BUILTINS_SEGUROS``; atributos com ``__`` são recusados."""
     if len(expr) > MAX_EXPRESSAO:  # antes de analisar: o tamanho limita o custo do ast.parse
         return f"é grande demais (máximo de {MAX_EXPRESSAO} caracteres).", _DICA_GRANDE
+    if "\x00" in expr:
+        return "tem um caractere que não é permitido (o caractere nulo).", "Apague a expressão e digite-a de novo."
+    arvore: ast.Expression | None = None
     try:
         arvore = ast.parse(expr, mode="eval")
+        compile(arvore, "<expressão>", "eval")  # só compila, sem executar: recusa o que o ast aceita e o runner não (await, yield…)
     except SyntaxError as e:
-        return f"tem um erro de escrita (sintaxe){_posicao(e.lineno, e.offset)}: {e.msg}.", _DICA_SINTAXE
-    except ValueError:
-        return "tem um caractere que não é permitido (como o caractere nulo).", "Apague a expressão e digite-a de novo."
+        # o ast.parse conta a coluna em caracteres; o compilador, em bytes UTF-8
+        coluna = _coluna(expr, e.lineno or 1, e.offset - 1) if arvore is not None and e.offset else e.offset
+        return f"tem um erro de escrita (sintaxe){_posicao(e.lineno, coluna)}: {e.msg}.", _DICA_SINTAXE
     except (RecursionError, MemoryError):
         return "é complexa demais para ser analisada.", _DICA_GRANDE
     permitidos = BUILTINS_SEGUROS | set(variaveis)
@@ -196,10 +200,12 @@ def problema_da_expressao(expr: str, variaveis: Any) -> tuple[str, str] | None:
     while pilha:
         no, ligados = pilha.pop()
         if isinstance(no, ast.Attribute) and no.attr.startswith("__"):
-            problemas.append((no.lineno, _coluna(expr, no), f"acessa “{no.attr}”, e atributos especiais (com __) não são permitidos",
+            problemas.append((no.lineno, _coluna(expr, no.lineno, no.col_offset),
+                              f"acessa “{no.attr}”, e atributos especiais (com __) não são permitidos",
                               "Use só atributos e métodos comuns, como nome.strip() ou texto.upper()."))
         if isinstance(no, ast.Name) and isinstance(no.ctx, ast.Load) and no.id not in ligados and no.id not in permitidos:
-            problemas.append((no.lineno, _coluna(expr, no), f"usa “{no.id}”, que não é uma variável dela nem uma função permitida",
+            problemas.append((no.lineno, _coluna(expr, no.lineno, no.col_offset),
+                              f"usa “{no.id}”, que não é uma variável dela nem uma função permitida",
                               "Crie a variável pelo botão “Conteúdo dinâmico” do campo ou use uma das funções permitidas: "
                               f"{', '.join(sorted(BUILTINS_SEGUROS))}."))
         if isinstance(no, ast.Lambda):
@@ -272,6 +278,7 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
     variaveis: dict[str, str] = {}                # passo "inicializar variável" -> tipo
     nomes_de_variavel: dict[str, str] = {}
     com_expressoes: set[str] = set()              # passos com expressão Python em algum campo: precisam do executor isolado
+    caracteres_de_expressao = 0
     saidas_vistas = False
 
     def nome(step_id: str) -> str:
@@ -325,10 +332,15 @@ def analisar(flow: Flow, resolver: Resolver, *, sandbox: Any = None, ultima_vers
                             f"{rotulo_tipo(tipos.get((ref.step, ref.output), 'qualquer'))}.")
 
     def conferir_expressao(p: Passo, campo: Campo, field_id: str, rotulo: str) -> None:
+        nonlocal caracteres_de_expressao
         if campo.expr is None or campo_vazio(campo, "qualquer"):
             return
         com_expressoes.add(p.id)
-        problema = problema_da_expressao(campo.expr, campo.refs or {})
+        caracteres_de_expressao += len(campo.expr)
+        # o teto por fluxo vem antes de analisar: cada análise custa, e um fluxo importado pode trazer milhares delas
+        problema = (problema_da_expressao(campo.expr, campo.refs or {}) if caracteres_de_expressao <= MAX_EXPRESSOES_FLUXO else
+                    (f"passa do limite de {MAX_EXPRESSOES_FLUXO:,} caracteres somando as expressões do fluxo.".replace(",", "."),
+                     "Troque as expressões mais longas por passos “Executar código Python”."))
         if problema:
             add(code="expressao_invalida", step_id=p.id, field=field_id,
                 message=f"{nome(p.id)}: a expressão de “{rotulo}” {problema[0]}", hint=problema[1])
