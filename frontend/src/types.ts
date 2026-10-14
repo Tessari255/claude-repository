@@ -67,8 +67,11 @@ export interface Ref {
   path: string
 }
 
-/** O valor de um campo: valor fixo ou conteúdo dinâmico (textos soltos e referências, como os “chips” do Power Automate). */
-export type Campo = { value: unknown } | { parts: (string | Ref)[] }
+/**
+ * O valor de um campo: valor fixo, conteúdo dinâmico (textos soltos e referências, como os “chips” do Power Automate) ou uma
+ * expressão Python cujas variáveis (`refs`) são conteúdos dinâmicos; ela só é avaliada no executor isolado.
+ */
+export type Campo = { value: unknown } | { parts: (string | Ref)[] } | { expr: string; refs: Record<string, Ref> }
 
 export interface Passo {
   id: string

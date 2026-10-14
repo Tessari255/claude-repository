@@ -348,8 +348,12 @@ pre.valor, pre.log {
 button.chip-dinamico { cursor: pointer; user-select: auto; }
 button.chip-dinamico:hover { background: #cddcf3; }
 .chip-invalido { background: #fbe4e0; color: var(--tijolo); border-color: var(--tijolo); border-style: dashed; }
-.acoes-campo { margin-top: 6px; }
+.acoes-campo { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 .btn-dinamico { background: #eef3fb; border-color: var(--anil); color: var(--anil); }
+.btn-expressao[aria-pressed='true'] { background: var(--tinta); border-color: var(--tinta); color: #f7f2e8; }
+.icone-expressao { font-family: var(--fonte-mono); font-weight: 700; font-style: italic; }
+.campo-expressao { font-family: var(--fonte-mono); font-size: 13px; resize: vertical; }
+.variaveis-expressao { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; font-size: 13px; }
 .valor-dinamico { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; }
 .usando-dinamico { list-style: none; display: flex; gap: 4px; flex-wrap: wrap; margin: 6px 0 0; padding: 0; }
 .seletor-dinamico { border: 1.5px solid var(--anil); border-radius: 10px; background: var(--superficie); box-shadow: var(--sombra); margin-top: 8px; padding: 8px 10px 10px; }

@@ -31,11 +31,16 @@ const clonar = <T,>(v: T): T => structuredClone(v)
 
 // ------------------------------------------------------------------ campos
 export type CampoDinamico = { parts: (string | Ref)[] }
+export type CampoExpressao = { expr: string; refs: Record<string, Ref> }
 
 export const campoLiteral = (value: unknown): Campo => ({ value })
 
 export function ehDinamico(c: Campo | undefined | null): c is CampoDinamico {
   return !!c && 'parts' in c && Array.isArray(c.parts)
+}
+
+export function ehExpressao(c: Campo | undefined | null): c is CampoExpressao {
+  return !!c && 'expr' in c && typeof c.expr === 'string'
 }
 
 /** As partes de um campo de texto: um valor fixo vira um único trecho de texto. */
@@ -66,17 +71,50 @@ export function referenciaUnica(c: Campo | undefined | null): Ref | null {
   return typeof p === 'string' ? null : p
 }
 
+/** Todo conteúdo dinâmico que o campo lê: as referências entre os textos ou as variáveis da expressão. */
 export function referenciasDe(c: Campo | undefined | null): Ref[] {
+  if (ehExpressao(c)) return Object.values(c.refs)
   return ehDinamico(c) ? c.parts.filter((p): p is Ref => typeof p !== 'string') : []
 }
 
-/** O campo está “sem preenchimento”? (espelha o servidor: texto fixo vazio e nenhum conteúdo dinâmico contam como vazio) */
+/** O campo está “sem preenchimento”? (espelha o servidor: texto fixo vazio, nenhum conteúdo dinâmico e expressão em branco contam como vazio) */
 export function campoVazio(c: Campo | undefined | null, tipo: string): boolean {
   if (!c) return true
+  if (ehExpressao(c)) return c.expr.trim() === ''
   if (ehDinamico(c)) return !c.parts.some((p) => typeof p !== 'string' || p !== '')
   const v = (c as { value: unknown }).value
   if (v === null || v === undefined) return true
   return tipo === 'texto' && typeof v === 'string' && v === ''
+}
+
+// ------------------------------------------------------------------ expressões Python
+// Palavras reservadas do Python: não servem como nome de variável (o servidor recusa).
+const RESERVADAS = new Set(['and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
+  'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try',
+  'while', 'with', 'yield'])
+
+/** Nome de variável para uma saída (“Números da lista” → `numeros_da_lista`): snake_case ASCII, começando por letra, até 40 caracteres, sem repetir `usados`. */
+export function nomeDeVariavel(rotulo: string, usados: Iterable<string>): string {
+  const ocupados = new Set(usados)
+  let base = rotulo.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  if (!/^[a-z]/.test(base)) base = `v_${base}`.replace(/_+$/, '')
+  base = base.slice(0, 40).replace(/_+$/, '')
+  let nome = base
+  for (let n = 2; RESERVADAS.has(nome) || ocupados.has(nome); n++) nome = `${base.slice(0, 40 - String(n).length - 1)}_${n}`
+  return nome
+}
+
+/** Os nomes que aparecem no texto da expressão (inclusive dentro de aspas: na dúvida, a variável fica). */
+export const nomesNaExpressao = (expr: string) => new Set(expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])
+
+/**
+ * Põe a saída `ref` como variável no trecho [inicio, fim) da expressão. Se ela já é uma variável, o mesmo nome é reaproveitado.
+ * Devolve o campo novo e onde o cursor fica.
+ */
+export function inserirVariavel(c: CampoExpressao, ref: Ref, rotulo: string, inicio: number, fim: number): { campo: CampoExpressao; cursor: number } {
+  const igual = Object.entries(c.refs).find(([, r]) => r.step === ref.step && r.output === ref.output && r.path === ref.path)
+  const nome = igual?.[0] ?? nomeDeVariavel(rotulo, [...Object.keys(c.refs), ...nomesNaExpressao(c.expr)])
+  return { campo: { expr: c.expr.slice(0, inicio) + nome + c.expr.slice(fim), refs: { ...c.refs, [nome]: ref } }, cursor: inicio + nome.length }
 }
 
 // ------------------------------------------------------------------ definição efetiva
@@ -279,15 +317,32 @@ function todasAsReferencias(passo: Passo): Ref[] {
   return refs
 }
 
-function reescreverReferencias(passo: Passo, troca: (r: Ref) => Ref): Passo {
-  const campo = (c: Campo | null | undefined): Campo | null | undefined =>
-    ehDinamico(c) ? { parts: c.parts.map((p) => (typeof p === 'string' ? p : troca(p))) } : c
+/** Aplica `fn` a cada campo do passo: as entradas e os dois lados das regras de uma condição. */
+function mapearCampos(passo: Passo, fn: (c: Campo) => Campo): Passo {
+  const campo = (c: Campo | null | undefined): Campo | null | undefined => (c ? fn(c) : c)
   const inputs = Object.fromEntries(Object.entries(passo.inputs ?? {}).map(([k, v]) => [k, campo(v) as Campo]))
   let params = passo.params
   if (Array.isArray(params?.regras)) {
     params = { ...params, regras: params.regras.map((r) => ({ ...r, esq: campo(r.esq), ...(r.dir ? { dir: campo(r.dir) } : {}) })) }
   }
   return { ...passo, inputs, params }
+}
+
+function reescreverReferencias(passo: Passo, troca: (r: Ref) => Ref): Passo {
+  return mapearCampos(passo, (c) => {
+    if (ehExpressao(c)) return { expr: c.expr, refs: Object.fromEntries(Object.entries(c.refs).map(([k, r]) => [k, troca(r)])) }
+    return ehDinamico(c) ? { parts: c.parts.map((p) => (typeof p === 'string' ? p : troca(p))) } : c
+  })
+}
+
+/** O fluxo sem as variáveis de expressão que saíram do texto (para não guardar conteúdo dinâmico que ninguém usa). */
+export function semVariaveisOrfas(flow: Flow): Flow {
+  const limpar = (p: Passo) => mapearCampos(p, (c) => {
+    if (!ehExpressao(c)) return c
+    const usados = nomesNaExpressao(c.expr)
+    return { expr: c.expr, refs: Object.fromEntries(Object.entries(c.refs).filter(([k]) => usados.has(k))) }
+  })
+  return { ...flow, trigger: limpar(flow.trigger), steps: mapearLista(flow.steps, limpar) }
 }
 
 /** Copia um passo (e tudo o que há dentro dele) logo depois do original, com ids novos. */
@@ -419,6 +474,7 @@ export function tipoCompativel(origem: string, destino: string): boolean {
 /** Texto curto de um campo para resumos (“Olá, {Nome}!”). */
 export function descreverCampo(c: Campo | null | undefined, nomeDe: (ref: Ref) => string): string {
   if (!c) return ''
+  if (ehExpressao(c)) return `ƒ ${c.expr}`
   if (!ehDinamico(c)) {
     const v = (c as { value: unknown }).value
     return typeof v === 'string' ? v : JSON.stringify(v)

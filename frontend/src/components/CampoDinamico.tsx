@@ -1,5 +1,8 @@
 import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { campoDePartes, ehDinamico, partesDe, referenciaUnica, referenciasDe, tipoCompativel, type GrupoDinamico } from '../lib/modelo'
+import {
+  campoDePartes, campoVazio, ehDinamico, ehExpressao, inserirVariavel, nomesNaExpressao, partesDe, referenciaUnica, referenciasDe, tipoCompativel,
+  type GrupoDinamico,
+} from '../lib/modelo'
 import { iconeDoBloco, ROTULO_TIPO } from '../lib/visual'
 import type { Campo, Ref, TipoDado } from '../types'
 import { Icon } from './Icons'
@@ -243,7 +246,7 @@ export function SeletorDeConteudo({
       </div>
       <p className="seletor-dica">
         <Icon name="python" size={14} />
-        <span>Precisa de uma lógica para transformar esses dados? Adicione um passo <strong>Executar código Python</strong>.</span>
+        <span>Precisa transformar esses dados? Para uma conta curta, use o modo <strong>ƒ Expressão</strong> do campo; para mais lógica, um passo <strong>Executar código Python</strong>.</span>
       </p>
     </div>
   )
@@ -296,13 +299,17 @@ function tipoDoValor(v: unknown): Exclude<TipoDado, 'qualquer'> {
 
 const padraoDoLiteral = (t: string): unknown => (t === 'numero' ? 0 : t === 'booleano' ? false : t === 'lista' ? [] : t === 'json' ? {} : '')
 
+const AJUDA_EXPRESSAO = 'Python: use as variáveis do botão “Conteúdo dinâmico” e funções como len, sum, min, max, round e str. ' +
+  'O resultado é conferido contra o tipo do campo quando o passo roda.'
+
 export function CampoDinamicoField({
   rotulo, tipo, campo, onChange, fonte, obrigatorio, ajuda, erro, multilinha, placeholder, desabilitado, aceitaDinamico = true,
 }: {
   rotulo: string
   tipo: TipoDado
   campo: Campo | undefined
-  onChange: (c: Campo | undefined) => void
+  /** `novaEtapa`: a mudança vira uma entrada própria no desfazer (trocar de modo), em vez de se juntar à digitação. */
+  onChange: (c: Campo | undefined, novaEtapa?: boolean) => void
   fonte: FonteDinamica
   obrigatorio?: boolean
   ajuda?: string
@@ -316,24 +323,50 @@ export function CampoDinamicoField({
   const idRotulo = `${id}-rotulo`
   const idAjuda = `${id}-ajuda`
   const idErro = `${id}-erro`
+  const idExpressao = `${id}-expressao`
   const texto = useRef<TextoComTokensRef>(null)
+  const areaExpressao = useRef<HTMLTextAreaElement>(null)
   const [aberto, setAberto] = useState(false)
   const [editando, setEditando] = useState<Ref | null>(null)
   const [tipoEscolhido, setTipoEscolhido] = useState<Exclude<TipoDado, 'qualquer'> | null>(null)
+  // O aviso vale para o modo em que a troca deixou o campo; desfeita a troca, ele some.
+  const [avisoDeTroca, setAvisoDeTroca] = useState<{ texto: string; emExpressao: boolean } | null>(null)
 
+  const expressao = ehExpressao(campo) ? campo : null
   const unica = referenciaUnica(campo)
   const refs = referenciasDe(campo)
-  const literal = campo && !ehDinamico(campo) ? (campo as { value: unknown }).value : undefined
+  const literal = campo && !ehDinamico(campo) && !expressao ? (campo as { value: unknown }).value : undefined
   // Em campos "qualquer" o tipo do valor fixo é escolhido pelo usuário (texto, número, sim/não, lista, objeto).
   const tipoLiteral: Exclude<TipoDado, 'qualquer'> = tipo === 'qualquer' ? (tipoEscolhido ?? tipoDoValor(literal)) : tipo
-  const usaTexto = tipo === 'texto' || (tipo === 'qualquer' && (ehDinamico(campo) || tipoLiteral === 'texto'))
+  const usaTexto = !expressao && (tipo === 'texto' || (tipo === 'qualquer' && (ehDinamico(campo) || tipoLiteral === 'texto')))
   const mensagemErro = erro ?? null
-  const descricao = [ajuda ? idAjuda : '', mensagemErro ? idErro : ''].filter(Boolean).join(' ') || undefined
+  const descricao = [ajuda ? idAjuda : '', expressao ? idExpressao : '', mensagemErro ? idErro : ''].filter(Boolean).join(' ') || undefined
 
   function aoEscolher(r: Ref) {
     setAberto(false)
+    if (expressao) {
+      const area = areaExpressao.current
+      const inicio = area?.selectionStart ?? expressao.expr.length
+      const { campo: novo, cursor } = inserirVariavel(expressao, r, fonte.descrever(r).saida, inicio, area?.selectionEnd ?? inicio)
+      onChange(novo)
+      requestAnimationFrame(() => { area?.focus(); area?.setSelectionRange(cursor, cursor) })
+      return
+    }
     if (usaTexto) { texto.current?.inserir(r); return }
     onChange({ parts: [r] })
+  }
+
+  // Trocar de modo começa o outro vazio, como uma etapa própria do desfazer; se havia algo, o aviso diz como recuperar.
+  // O foco fica no botão, fora de um campo de texto, para Ctrl+Z desfazer a troca na hora.
+  function trocarModo() {
+    setAberto(false)
+    setEditando(null)
+    const tinha = !campoVazio(campo, 'texto')
+    onChange(expressao ? { value: padraoDoLiteral(tipoLiteral) } : { expr: '', refs: {} }, true)
+    setAvisoDeTroca(tinha ? {
+      texto: `O conteúdo anterior de “${rotulo}” foi substituído. Para recuperá-lo, use Desfazer (Ctrl+Z ou o botão da barra).`,
+      emExpressao: !expressao,
+    } : null)
   }
 
   function atualizarRef(antiga: Ref, nova: Ref | null) {
@@ -353,7 +386,7 @@ export function CampoDinamicoField({
       <div className="rotulo-linha">
         <span id={idRotulo} className="rotulo-campo">{rotulo}{obrigatorio && <span className="obrigatorio" aria-hidden="true"> *</span>}</span>
         {tipo !== 'texto' && <span className="tipo-esperado">{ROTULO_TIPO[tipo]}</span>}
-        {tipo === 'qualquer' && !ehDinamico(campo) && (
+        {tipo === 'qualquer' && !ehDinamico(campo) && !expressao && (
           <select aria-label={`Tipo do valor de ${rotulo}`} className="seletor-tipo-valor" value={tipoLiteral} disabled={desabilitado}
             onChange={(e) => {
               const novo = e.target.value as Exclude<TipoDado, 'qualquer'>
@@ -365,7 +398,27 @@ export function CampoDinamicoField({
         )}
       </div>
 
-      {usaTexto ? (
+      {expressao ? (
+        <>
+          <textarea
+            ref={areaExpressao} className="campo-expressao" rows={2} maxLength={2000} spellCheck={false} autoCapitalize="off" autoComplete="off"
+            aria-label={`${rotulo} (expressão Python)`} aria-describedby={descricao} aria-invalid={mensagemErro ? true : undefined}
+            aria-required={obrigatorio ? true : undefined} disabled={desabilitado} placeholder="Ex.: len(itens) * 2"
+            value={expressao.expr} onChange={(e) => onChange({ expr: e.target.value, refs: expressao.refs })}
+          />
+          <p id={idExpressao} className="campo-ajuda">{AJUDA_EXPRESSAO}</p>
+          {Object.keys(expressao.refs).length > 0 && (
+            <ul className="variaveis-expressao" aria-label={`Variáveis da expressão de ${rotulo}`}>
+              {Object.entries(expressao.refs).map(([nome, r]) => (
+                <li key={nome}>
+                  <code>{nome}</code> = <span className={`chip-dinamico${fonte.descrever(r).valido ? '' : ' chip-invalido'}`}>{rotuloDaRef(fonte, r)}</span>
+                  {!nomesNaExpressao(expressao.expr).has(nome) && <span className="campo-ajuda"> (não usada: sai ao salvar)</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : usaTexto ? (
         <TextoComTokens
           ref={texto} rotuloId={idRotulo} rotuloTexto={rotulo} partes={partesDe(campo)} fonte={fonte}
           onPartes={(p) => {
@@ -398,9 +451,17 @@ export function CampoDinamicoField({
           <button type="button" className="btn btn-pequeno btn-dinamico" aria-expanded={aberto} onClick={() => setAberto((v) => !v)}>
             <Icon name="dynamic" size={14} /> Conteúdo dinâmico
           </button>
+          <button type="button" className="btn btn-pequeno btn-expressao" aria-pressed={!!expressao} onClick={trocarModo}
+            title={expressao ? 'Voltar a um valor fixo ou conteúdo dinâmico' : 'Calcular o valor com uma expressão Python'}>
+            <span aria-hidden="true" className="icone-expressao">ƒ</span> Expressão
+          </button>
         </div>
       )}
-      {aberto && <SeletorDeConteudo fonte={fonte} tipoEsperado={tipo} aceitaQualquerTipo={usaTexto || tipo === 'qualquer'} onEscolher={aoEscolher} onFechar={() => setAberto(false)} />}
+      {avisoDeTroca && avisoDeTroca.emExpressao === !!expressao && <p className="campo-ajuda" role="status">{avisoDeTroca.texto}</p>}
+      {aberto && (
+        <SeletorDeConteudo fonte={fonte} tipoEsperado={tipo} aceitaQualquerTipo={!!expressao || usaTexto || tipo === 'qualquer'}
+          onEscolher={aoEscolher} onFechar={() => setAberto(false)} />
+      )}
 
       {usaTexto && refs.length > 0 && (
         <ul className="usando-dinamico" aria-label={`Conteúdos dinâmicos usados em ${rotulo}`}>

@@ -2,6 +2,7 @@
 // sem React e sem rede. O servidor segue sendo a fonte da verdade: revisão desatualizada é recusada por ele.
 
 import type { Flow, Issue, Project } from '../types'
+import { semVariaveisOrfas } from './modelo'
 
 /**
  * Há alterações que o servidor ainda não tem? Só faz sentido com o projeto carregado (`salvoJson` existe)
@@ -13,9 +14,12 @@ export function estaSujo(a: {
   return a.salvoJson !== null && !a.somenteLeitura && (a.fluxoJson !== a.salvoJson || a.nome !== a.nomeSalvo)
 }
 
-/** Corpo do salvamento: nome em branco mantém o que já estava salvo, e a revisão de base permite ao servidor achar o conflito. */
+/**
+ * Corpo do salvamento: nome em branco mantém o que já estava salvo, a revisão de base permite ao servidor achar o conflito e as
+ * variáveis que saíram do texto de uma expressão não são gravadas.
+ */
 export function corpoDoSalvamento(projeto: Pick<Project, 'name' | 'revision'>, nome: string, flow: Flow) {
-  return { name: nome.trim() || projeto.name, flow, base_revision: projeto.revision }
+  return { name: nome.trim() || projeto.name, flow: semVariaveisOrfas(flow), base_revision: projeto.revision }
 }
 
 export type FalhaDoSalvamento =

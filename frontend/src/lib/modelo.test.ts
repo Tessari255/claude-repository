@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { BlockType, Flow, Passo, PortTypes, Regra, Run } from '../types'
 import {
-  achar, atualizarPasso, blocoPythonDoPasso, campoDePartes, campoVazio, conteudoDinamicoPara, definicaoEfetiva, duplicar, fixarVersao, inserir, linhaDoPasso,
-  mover, novoPasso, partesDe, referenciaUnica, remover, renomearSaida, repeticoesDoLaco, rotuloDoDestino, tipoDaEntrada, todosOsPassos, usaOPasso, visiveisPara,
+  achar, atualizarPasso, blocoPythonDoPasso, campoDePartes, campoVazio, conteudoDinamicoPara, definicaoEfetiva, descreverCampo, duplicar, fixarVersao,
+  inserir, inserirVariavel, linhaDoPasso, mover, nomeDeVariavel, novoPasso, partesDe, referenciaUnica, referenciasDe, remover, renomearSaida,
+  repeticoesDoLaco, rotuloDoDestino, semVariaveisOrfas, tipoDaEntrada, todosOsPassos, usaOPasso, visiveisPara,
 } from './modelo'
 
 const def = (over: Partial<BlockType> & { id: string }): BlockType => ({
@@ -53,6 +54,70 @@ describe('campos com conteúdo dinâmico', () => {
     expect(campoVazio({ value: null }, 'numero')).toBe(true)
     expect(campoVazio({ parts: [''] }, 'texto')).toBe(true)
     expect(campoVazio({ parts: [{ step: 'a', output: 'b', path: '' }] }, 'texto')).toBe(false)
+  })
+})
+
+describe('campos com expressão Python', () => {
+  const nome = { step: 'gatilho', output: 'nome', path: '' }
+  const n = { step: 'gatilho', output: 'n', path: '' }
+
+  it('o nome da variável vem do rótulo: snake_case ASCII, identificador válido, sem palavra reservada e sem repetir', () => {
+    expect(nomeDeVariavel('Números da lista', [])).toBe('numeros_da_lista')
+    expect(nomeDeVariavel('  Ação/Preço (R$) ', [])).toBe('acao_preco_r')
+    expect(nomeDeVariavel('1º valor', [])).toBe('v_1_valor')
+    expect(nomeDeVariavel('???', [])).toBe('v')
+    expect(nomeDeVariavel('For', [])).toBe('for_2')
+    expect(nomeDeVariavel('Lambda', [])).toBe('lambda_2')
+    expect(nomeDeVariavel('Nome', ['nome', 'nome_2'])).toBe('nome_3')
+    const longo = nomeDeVariavel('x'.repeat(60), ['x'.repeat(40)])
+    expect(longo).toMatch(/^[a-z][a-z0-9_]{0,39}$/)
+    expect(longo.endsWith('_2')).toBe(true)
+  })
+
+  it('inserir uma variável põe o nome no cursor, registra a referência e reaproveita a que já existe', () => {
+    const vazio = { expr: '', refs: {} }
+    const a = inserirVariavel(vazio, nome, 'Nome', 0, 0)
+    expect(a).toEqual({ campo: { expr: 'nome', refs: { nome } }, cursor: 4 })
+    const b = inserirVariavel({ expr: 'len() * 2', refs: {} }, n, 'Número', 4, 4)
+    expect(b.campo.expr).toBe('len(numero) * 2')
+    expect(b.cursor).toBe(10)
+    const c = inserirVariavel(a.campo, nome, 'Nome', 4, 4)
+    expect(c.campo).toEqual({ expr: 'nomenome', refs: { nome } })
+    // o nome novo não colide com o que já está escrito (aqui, a função sum)
+    expect(inserirVariavel({ expr: 'sum()', refs: {} }, n, 'Sum', 4, 4).campo.expr).toBe('sum(sum_2)')
+    // substitui a seleção
+    expect(inserirVariavel({ expr: 'XX + 1', refs: {} }, n, 'n', 0, 2).campo.expr).toBe('n + 1')
+  })
+
+  it('vazio, referências e resumo de um campo com expressão', () => {
+    expect(campoVazio({ expr: '  ', refs: {} }, 'numero')).toBe(true)
+    expect(campoVazio({ expr: '1', refs: {} }, 'texto')).toBe(false)
+    expect(referenciasDe({ expr: 'nome', refs: { nome } })).toEqual([nome])
+    expect(descreverCampo({ expr: 'len(nome) * 2', refs: { nome } }, () => 'x')).toBe('ƒ len(nome) * 2')
+    expect(partesDe({ expr: 'nome', refs: { nome } })).toEqual([])
+  })
+
+  it('variáveis que saíram do texto não são gravadas, nas entradas e nas regras, em qualquer nível', () => {
+    const orfao = { expr: 'nome.upper()', refs: { nome, sobra: n } }
+    const regra: Regra = { esq: orfao, op: 'igual', dir: { expr: '1', refs: { n } } }
+    const f = fluxo([p('c', 'condicao', { params: { regras: [regra] }, slots: { sim: [p('dentro', 'compor', { inputs: { entrada: orfao } })], nao: [] } })])
+    const limpo = semVariaveisOrfas(f)
+    expect(achar(limpo, 'dentro')!.passo.inputs.entrada).toEqual({ expr: 'nome.upper()', refs: { nome } })
+    const r = (limpo.steps[0].params.regras as Regra[])[0]
+    expect(r.esq).toEqual({ expr: 'nome.upper()', refs: { nome } })
+    expect(r.dir).toEqual({ expr: '1', refs: {} })
+    expect(achar(f, 'dentro')!.passo.inputs.entrada).toBe(orfao)  // o original não muda
+  })
+
+  it('duplicar e renomear uma saída acompanham as variáveis das expressões', () => {
+    const f = fluxo([p('a'), p('b', 'compor', { inputs: { entrada: { expr: 'x + y', refs: { x: { step: 'a', output: 'resultado', path: '' }, y: n } } } })])
+    const r = renomearSaida(f, 'gatilho', 'n', 'numero')
+    expect(achar(r, 'b')!.passo.inputs.entrada).toEqual({ expr: 'x + y', refs: { x: { step: 'a', output: 'resultado', path: '' }, y: { ...n, output: 'numero' } } })
+    expect(usaOPasso(f, 'a')).toBe(true)
+    const d = duplicar(fluxo([p('a', 'escopo', { slots: { corpo: [p('a1'), p('a2', 'compor', { inputs: { entrada: { expr: 'v', refs: { v: { step: 'a1', output: 'resultado', path: '' } } } } })] } })]), 'a')
+    const copia = achar(d.flow, d.novoId!)!.passo
+    const [c1, c2] = copia.slots!.corpo
+    expect((c2.inputs.entrada as { refs: Record<string, { step: string }> }).refs.v.step).toBe(c1.id)
   })
 })
 

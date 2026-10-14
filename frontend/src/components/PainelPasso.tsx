@@ -110,23 +110,23 @@ export function PainelPasso({
   const bloqueado = usaCodigoPython(def, completos) && !!sistema && !sistema.executor.disponivel
 
   // ------------------------------------------------------------------ alterações
-  function mudarParametro(p: ParamDef, valor: unknown) {
+  function mudarParametro(p: ParamDef, valor: unknown, novaEtapa?: boolean) {
     atualizar((x) => {
       const params = { ...x.params, [p.id]: valor }
       // entradas cujo tipo depende deste parâmetro (ex.: valor inicial da variável) voltam ao padrão do novo tipo
       const inputs = { ...x.inputs }
       for (const porta of def!.inputs) if (porta.type_from?.param === p.id && inputs[porta.id] && !('parts' in inputs[porta.id])) delete inputs[porta.id]
       return { ...x, params, inputs }
-    }, `param:${passo.id}:${p.id}`)
+    }, novaEtapa ? undefined : `param:${passo.id}:${p.id}`)
   }
 
-  function mudarCampo(portaId: string, campo: import('../types').Campo | undefined) {
+  function mudarCampo(portaId: string, campo: import('../types').Campo | undefined, novaEtapa?: boolean) {
     atualizar((x) => {
       const inputs = { ...x.inputs }
       if (campo === undefined) delete inputs[portaId]
       else inputs[portaId] = campo
       return { ...x, inputs }
-    }, `campo:${passo.id}:${portaId}`)
+    }, novaEtapa ? undefined : `campo:${passo.id}:${portaId}`)
   }
 
   function mudarPortas(p: ParamDef, valor: unknown, renomeacoes: { de: string; para: string }[]) {
@@ -151,7 +151,7 @@ export function PainelPasso({
       return (
         <RegrasEditor key={p.id} regras={regrasDoParametro(valor)} combinador={String(completos.combinador ?? 'e')} def={p} fonte={fonte}
           erro={erroDe(p.id)} desabilitado={somenteLeitura}
-          onRegras={(r: Regra[]) => mudarParametro(p, r)}
+          onRegras={(r: Regra[], novaEtapa?: boolean) => mudarParametro(p, r, novaEtapa)}
           onCombinador={(c) => mudarParametro(def!.params.find((x) => x.id === 'combinador')!, c)} />
       )
     }
@@ -198,7 +198,7 @@ export function PainelPasso({
         key={porta.id} rotulo={porta.label} tipo={tipo} campo={passo.inputs[porta.id]} fonte={fonte} obrigatorio={obrigatoria}
         ajuda={porta.description || undefined} erro={erroDe(porta.id)} desabilitado={somenteLeitura}
         multilinha={tipo === 'texto' && /mensagem|texto/i.test(porta.id) && def.id === 'builtin.encerrar'}
-        onChange={(c) => mudarCampo(porta.id, c)}
+        onChange={(c, novaEtapa) => mudarCampo(porta.id, c, novaEtapa)}
       />
     )
   }

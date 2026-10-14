@@ -19,10 +19,11 @@ export function RegrasEditor({
   fonte: FonteDinamica
   erro?: string | null
   desabilitado?: boolean
-  onRegras: (r: Regra[]) => void
+  onRegras: (r: Regra[], novaEtapa?: boolean) => void
   onCombinador?: (c: string) => void
 }) {
-  const alterar = (i: number, parcial: Partial<Regra>) => onRegras(regras.map((r, k) => (k === i ? { ...r, ...parcial } : r)))
+  const alterar = (i: number, parcial: Partial<Regra>, novaEtapa?: boolean) =>
+    onRegras(regras.map((r, k) => (k === i ? { ...r, ...parcial } : r)), novaEtapa)
   const nova: Regra = { esq: { value: '' }, op: 'igual', dir: { value: '' } }
   return (
     <fieldset className="regras" aria-label={def.label}>
@@ -34,7 +35,7 @@ export function RegrasEditor({
           <div className="regra" key={i} role="group" aria-label={`Condição ${i + 1}`}>
             {i > 0 && <p className="regra-juncao">{combinador === 'ou' ? 'OU' : 'E'}</p>}
             <CampoDinamicoField rotulo={`Valor da ${nome}`} tipo="qualquer" campo={r.esq} fonte={fonte} desabilitado={desabilitado}
-              onChange={(c) => alterar(i, { esq: c ?? { value: '' } })} placeholder="Escolha um valor" />
+              onChange={(c, nova) => alterar(i, { esq: c ?? { value: '' } }, nova)} placeholder="Escolha um valor" />
             <div className="campo">
               <label htmlFor={`op-${i}`} className="rotulo-campo">Teste da {nome}</label>
               <select id={`op-${i}`} value={r.op} disabled={desabilitado}
@@ -47,7 +48,7 @@ export function RegrasEditor({
             </div>
             {!unario && (
               <CampoDinamicoField rotulo={`Comparar com (${nome})`} tipo="qualquer" campo={r.dir ?? undefined} fonte={fonte} desabilitado={desabilitado}
-                onChange={(c) => alterar(i, { dir: c ?? { value: '' } })} placeholder="Escolha ou digite um valor" />
+                onChange={(c, nova) => alterar(i, { dir: c ?? { value: '' } }, nova)} placeholder="Escolha ou digite um valor" />
             )}
             {regras.length > 1 && !desabilitado && (
               <button type="button" className="btn btn-pequeno btn-perigo-suave" onClick={() => onRegras(regras.filter((_, k) => k !== i))}>
