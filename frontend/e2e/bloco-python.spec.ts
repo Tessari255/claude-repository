@@ -184,6 +184,7 @@ test('Para cada com um passo Python dentro: o painel explica o lote e o laço mo
   const laco = await adicionarNoFim(page, 'Para cada')
   await expect(painel.getByText('Python dentro do laço')).toBeVisible()
   await expect(painel).toContainText('só um passo de código Python')
+  await expect(painel).toContainText('uma expressão numa entrada do passo, cada item roda separado')
   await semViolacoesDeAcessibilidade(page, '.painel-passo')
   await inserirConteudoDinamico(page, laco, 'Lista', 'Números')
 

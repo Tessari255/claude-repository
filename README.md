@@ -126,8 +126,8 @@ e os passos seguintes ficam **ignorados**, cada um explicando por quê.
 
 **0. Expressão no campo.** Em qualquer campo, **ƒ Expressão** troca o valor por uma expressão Python, como `nome.strip().title()` ou
 `round(sum(numeros) / len(numeros), 2)`. **Conteúdo dinâmico** insere uma *variável* (o nome vem do rótulo da saída: “Números” vira `numeros`);
-variáveis que saíram do texto não são gravadas. O verificador confere a expressão **sem executá-la** (sintaxe, com a coluna; nomes; nada de
-atributos com `__`). Ela só pode usar as suas variáveis e as funções `abs all any bool dict divmod enumerate filter float int isinstance len list map
+a lista de variáveis mostra o passo de origem de cada uma, e as que saíram do texto ficam de fora ao salvar, verificar, testar e exportar.
+O verificador confere a expressão **sem executá-la** (sintaxe, com a coluna; nomes; nada de atributos com `__`). Ela só pode usar as suas variáveis e as funções `abs all any bool dict divmod enumerate filter float int isinstance len list map
 max min pow range reversed round set sorted str sum tuple zip`. Quando o passo roda, todas as expressões dele (inclusive as das regras de uma
 condição) vão em **um** trabalho ao contêiner; o resultado precisa ser JSON e é conferido contra o tipo do campo; um erro aponta o campo, a
 expressão e a coluna, e não é repetido pelas novas tentativas. *Repetir até* calcula as expressões da condição a cada repetição, e um *Para cada*
@@ -273,8 +273,8 @@ O fluxo é um JSON (chaves em inglês, valores em português) — trecho do exem
 ```
 
 Cada campo de um passo é um valor fixo (`{"value": …}`), uma lista de pedaços (`{"parts": [...]}`) de texto e referências ou uma expressão
-(`{"expr": "len(itens) * 2", "refs": {"itens": {…referência…}}}`; até 2.000 caracteres e 20 variáveis). Passos com
-ramificações ou corpo (`condicao`, `para_cada`, `escopo`…) guardam os filhos em `slots`. O histórico guarda, por execução e por passo (e por repetição):
+(`{"expr": "len(itens) * 2", "refs": {"itens": {…referência…}}}`; até 2.000 caracteres e 20 variáveis, e até 100.000 caracteres de
+expressão somados no fluxo). Passos com ramificações ou corpo (`condicao`, `para_cada`, `escopo`…) guardam os filhos em `slots`. O histórico guarda, por execução e por passo (e por repetição):
 entradas, saídas, logs, erro, estado e tempos.
 
 ### Banco e migração

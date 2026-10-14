@@ -46,6 +46,7 @@ test('expressão Python num campo: erro de sintaxe no verificador, correção, t
   await page.keyboard.type(')')
   await expect(painel.locator('.campo-erro')).toHaveCount(0)
   await expect(compor).toContainText('ƒ nome.strip().title()')
+  await modo.hover()  // ligado e com o mouse em cima, o botão continua legível
   await semViolacoesDeAcessibilidade(page, '.painel-passo')
 
   // a saída mostra a média calculada por outra expressão e o nome formatado pelo Compor
@@ -75,4 +76,41 @@ test('o modelo de expressões roda pelo contêiner e mostra o resultado document
   const resultado = await testar(page)
   await expect(resultado.locator('.saida-final').filter({ hasText: 'Saudação' })).toContainText('Olá, Ana Souza!')
   await expect(resultado.locator('.saida-final').filter({ hasText: 'Acima da média' })).toContainText('23')
+})
+
+test('variável que saiu do texto não pesa no verificador nem no teste, e a lista mostra o passo de origem', async ({ page }) => {
+  await importarExemplo(page, '07-expressoes.json')
+  await page.locator('[data-passo="saudacao"] > .cartao-principal').click()
+  const painel = page.getByRole('complementary', { name: /^Configuração de Saída final/ })
+  const variaveis = painel.getByRole('list', { name: 'Variáveis da expressão de Valor' })
+  await expect(variaveis).toContainText('nome = Resultado do passo “Nome formatado”')
+  await painel.getByRole('textbox', { name: 'Valor (expressão Python)' }).fill('"Olá!"')
+  await expect(variaveis).toContainText('(não usada: é ignorada)')
+
+  // o passo de origem dela pode sair: ninguém usa o conteúdo dele, e o teste roda
+  await page.getByRole('button', { name: 'Mais ações para Nome formatado' }).click()
+  await page.getByRole('menuitem', { name: 'Excluir' }).click()
+  const aviso = page.locator('.toast').filter({ hasText: 'excluído' })
+  await expect(aviso).toBeVisible()
+  await expect(aviso).not.toContainText('Outros passos usavam')
+  const resultado = await testar(page)
+  await expect(resultado.locator('.saida-final').filter({ hasText: 'Saudação' })).toContainText('Olá!')
+})
+
+test('o aviso de troca de modo fica no passo em que ela aconteceu, e trocar o Tipo não apaga a expressão', async ({ page }) => {
+  await importarExemplo(page, '07-expressoes.json')
+  const painel = page.getByRole('complementary', { name: /^Configuração de/ })
+  await page.locator('[data-passo="sem_numeros"] > .cartao-principal').click()
+  await painel.getByRole('button', { name: 'Expressão' }).click()
+  await expect(painel.getByText('foi substituído')).toBeVisible()
+  await page.locator('[data-passo="media"] > .cartao-principal').click()
+  await expect(painel.getByRole('textbox', { name: 'Valor (expressão Python)' })).toHaveValue('sum(numeros) / len(numeros)')
+  await expect(painel.getByText('foi substituído')).toHaveCount(0)
+
+  await adicionarNoFim(page, 'Inicializar variável')
+  const expressao = painel.getByRole('textbox', { name: 'Valor inicial (expressão Python)' })
+  await painel.getByRole('button', { name: 'Expressão' }).click()
+  await expressao.fill('len(numeros) * 2')
+  await painel.getByRole('combobox', { name: 'Tipo', exact: true }).selectOption('numero')
+  await expect(expressao).toHaveValue('len(numeros) * 2')
 })
