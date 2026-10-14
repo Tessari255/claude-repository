@@ -386,6 +386,13 @@ class DockerExecutor:
             return SandboxResult(False, error=_erro(
                 "executor_indisponivel", f"A imagem do executor ({self.imagem}) é antiga e não calcula expressões.",
                 suggestion="Rode `./scripts/build-executor.sh` (ou `make executor`) e tente de novo."))
+        # Várias variáveis podem apontar para o mesmo valor grande: mede valor a valor e para no teto, antes de montar o trabalho.
+        soma = 0
+        for pedido in expressoes:
+            for valor in pedido["vars"].values():
+                soma += len(json.dumps(valor, ensure_ascii=True))
+                if soma > limites.valor_max * 4:
+                    return _grande_demais(limites)
         r = self.run("expr", "", items=expressoes, limits=limites)
         if not r.ok:
             return r

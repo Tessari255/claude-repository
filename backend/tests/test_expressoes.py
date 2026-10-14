@@ -274,6 +274,15 @@ def test_valores_e_erros_do_runner_so_passam_conferidos(monkeypatch):
     assert a["error"]["type"] == "RetornoInvalido" and b == {"id": "b", "value": {"k": [1, 2]}}
 
 
+def test_variaveis_grandes_demais_sao_recusadas_antes_de_montar_o_trabalho(monkeypatch):
+    ex = DockerExecutor("falsa", Limites())
+    monkeypatch.setattr(ex, "status", lambda forcar=False: ExecutorStatus(True, "falsa", lote=True, expr=True))
+    monkeypatch.setattr("app.sandbox.executor._serializar", lambda _t: pytest.fail("montou o trabalho inteiro para depois recusar"))
+    grande = "é" * 500_000  # 3 MB no JSON (cada é vira \u00e9): 20 variáveis × 10 campos seriam 600 MB
+    r = ex.run_expr([{"id": f"e{i}", "code": "1", "vars": {f"v{j}": grande for j in range(20)}} for i in range(10)])
+    assert not r.ok and r.error["category"] == "valor_grande_demais"
+
+
 def test_imagem_antiga_recusa_expressoes_com_pedido_de_reconstruir(monkeypatch):
     ex = DockerExecutor("antiga", Limites())
     monkeypatch.setattr(ex, "status", lambda forcar=False: ExecutorStatus(True, "antiga", lote=True))
@@ -382,6 +391,16 @@ def test_falha_do_trabalho_inteiro_vira_erro_do_passo(settings):
     assert erro["code"] == "tempo_esgotado" and erro["message"].startswith("Ao calcular as expressões do passo: o tempo máximo")
 
 
+def test_expressao_em_branco_num_campo_opcional_usa_o_padrao_sem_ir_ao_executor(settings):
+    ex = ExecutorDeExpressoes({})
+    f = fluxo([passo("total", "builtin.var_inicializar", {"inicial": lit(0)}, {"nome": "n", "tipo": "numero"}),
+               passo("inc", "builtin.var_incrementar", {"quantidade": expr("")}, {"variavel": "total"}),  # ƒ ligado e deixado em branco
+               saida("s", "Total", ref("total", "valor"))])
+    run = _montar(settings, ex).executar(f)
+    assert run["state"] == "concluido", run["error"]
+    assert ex.trabalhos == [] and run["result"]["outputs"][0]["value"] == 1
+
+
 def test_repetir_ate_calcula_a_condicao_a_cada_repeticao_e_ignora_o_segundo_valor_de_testes_unarios(settings):
     ex = ExecutorDeExpressoes({"n >= 3": lambda v: v["n"] >= 3})
     regra = {"esq": expr("n >= 3", n=("total", "valor")), "op": "verdadeiro", "dir": expr("nao_deve_rodar")}
@@ -406,6 +425,16 @@ def test_para_cada_com_expressao_no_passo_python_segue_o_caminho_de_um_trabalho_
     assert run["state"] == "concluido", run["error"]
     assert ex.lotes == 0 and ex.blocos == [{"n": 10}, {"n": 20}, {"n": 30}] and len(ex.trabalhos) == 3
     assert [repeticoes(run, "p")[(i,)]["outputs"] for i in range(3)] == [{"dobro": 20}, {"dobro": 40}, {"dobro": 60}]
+
+
+def test_para_cada_percorre_a_lista_calculada_por_expressao(settings):
+    ex = ExecutorDeExpressoes({"sorted(numeros, reverse=True)": lambda v: sorted(v["numeros"], reverse=True)})
+    f = fluxo([passo("laco", "builtin.para_cada", {"lista": expr("sorted(numeros, reverse=True)", numeros=("gatilho", "numeros"))},
+                     {"limite": 10}, slots={"corpo": [compor("x", ref("laco", "item"))]})], gatilho_padrao())
+    run = _montar(settings, ex).executar(f)
+    assert run["state"] == "concluido", run["error"]
+    assert ex.trabalhos == [[{"id": "entrada:lista", "code": "sorted(numeros, reverse=True)", "vars": {"numeros": [1, 2, 3]}}]]
+    assert [repeticoes(run, "x")[(i,)]["outputs"]["resultado"] for i in range(3)] == [3, 2, 1]
 
 
 def test_cancelar_enquanto_as_expressoes_sao_calculadas_para_antes_do_passo(settings):
