@@ -50,6 +50,17 @@ def test_campo_com_expressao_relê_igual_e_so_emite_a_chave_ativa():
     assert Campo.model_validate({"expr": "1 + 1"}).model_dump() == {"expr": "1 + 1", "refs": {}}
 
 
+def test_regras_saem_do_servidor_no_mesmo_formato_das_entradas(client):
+    # As regras ficam em params, que não passam pelo Campo: sem isto, {"expr": ...} sem refs chegava assim ao editor.
+    f = fluxo([condicao("c", {"expr": "1 > 0"}, "igual", {"expr": "True", "refs": None})])
+    p = client.post("/api/projetos", json={"name": "x"}).json()
+    salvo = client.put(f"/api/projetos/{p['id']}", json={"flow": f}).json()["flow"]
+    exportado = client.post("/api/fluxos/exportar", json={"name": "x", "flow": f}).json()["flow"]
+    for flow in (salvo, exportado):
+        regra = flow["steps"][0]["params"]["regras"][0]
+        assert regra["esq"] == {"expr": "1 > 0", "refs": {}} and regra["dir"] == {"expr": "True", "refs": {}}
+
+
 @pytest.mark.parametrize("bruto", [
     {"expr": "1", "value": 1},
     {"expr": "1", "parts": ["a"]},

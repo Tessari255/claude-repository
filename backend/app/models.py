@@ -15,7 +15,7 @@ import keyword
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_serializer, model_validator
 
 from .tipos import TIPOS_DADO, validar_json_puro
 
@@ -295,6 +295,14 @@ class Campo(Estrito):
         return [p for p in (self.parts or []) if isinstance(p, Ref)] + list((self.refs or {}).values())
 
 
+def _campo_canonico(bruto: Any) -> Any:
+    """O campo como as entradas o gravam (uma expressão sempre com ``refs``); o que não valida fica como veio, para o verificador apontar."""
+    try:
+        return Campo.model_validate(bruto).model_dump()
+    except ValidationError:
+        return bruto
+
+
 class Regra(Estrito):
     """Uma comparação da Condição / Repetir até: ``esq`` <operador> ``dir`` (testes como “está vazio” não usam ``dir``)."""
 
@@ -342,6 +350,9 @@ class Passo(Estrito):
             validar_json_puro(v)
         except ValueError as e:
             raise ValueError(f"configuração inválida: {e}") from None
+        if isinstance(v.get("regras"), list):  # as regras ficam em params (dict cru): saem no mesmo formato das entradas
+            v = {**v, "regras": [{**r, **{lado: _campo_canonico(r[lado]) for lado in ("esq", "dir") if r.get(lado) is not None}}
+                                 if isinstance(r, dict) else r for r in v["regras"]]}
         return v
 
     @field_validator("run_after")
